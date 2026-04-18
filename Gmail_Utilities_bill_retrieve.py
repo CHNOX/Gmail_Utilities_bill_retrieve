@@ -1,40 +1,23 @@
 """
 Gmail Utilities Bill Retrieve
 ==============================
-Recupera tutte le email ricevute dai mittenti Enel:
-  - enelenergia@enel.sandsiv.com
-  - noreply.enelenergia@enel.com  (estrae anche "TOTALE DA PAGARE")
+Legge la configurazione da settings.json e per ogni mittente:
+  - recupera tutte le email
+  - estrae i valori delle chiavi configurate (es. "TOTALE DA PAGARE")
 
-e genera un file Excel con i dettagli (data, mittente, oggetto, anteprima,
-importo da pagare).
+Genera un file Excel con una colonna per ogni chiave di estrazione.
 
 PREREQUISITI:
 1. Python 3.7+
-2. Installa le dipendenze:
-       pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl
+2. pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl
 
-3. Vai su https://console.cloud.google.com/
-   - Crea un nuovo progetto (o seleziona uno esistente)
-   - Abilita "Gmail API" (API e servizi > Libreria > cerca "Gmail API" > Abilita)
-   - Vai su "API e servizi > Credenziali"
-   - Clicca "Crea credenziali > ID client OAuth"
-   - Tipo applicazione: "App desktop"
-   - Scarica il file JSON e rinominalo "credentials.json"
-   - Mettilo nella stessa cartella di questo script
+3. Scarica credentials.json da Google Cloud Console (vedi README).
 
-4. (Solo la prima volta) Vai su "API e servizi > Schermata consenso OAuth"
-   - Seleziona "Esterno" e compila i campi obbligatori
-   - In "Ambiti" aggiungi: https://www.googleapis.com/auth/gmail.readonly
-   - In "Utenti di test" aggiungi il tuo indirizzo Gmail
-
-5. Esegui:
-       python Gmail_Utilities_bill_retrieve.py
-
-   La prima volta si aprirà il browser per autorizzare l'accesso.
-   Le credenziali vengono salvate in "token.json" per gli accessi successivi.
+4. Configura settings.json con i mittenti e le chiavi da estrarre.
 """
 
 import base64
+import json
 import os
 import re
 import sys
@@ -49,11 +32,48 @@ from googleapiclient.discovery import build
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 CREDENTIALS_FILE = "credentials.json"
-TOKEN_FILE = "token.json"
-BATCH_SIZE = 500
+TOKEN_FILE        = "token.json"
+SETTINGS_FILE     = "settings.json"
+BATCH_SIZE        = 500
 
-SENDER_SANDSIV = "enelenergia@enel.sandsiv.com"
-SENDER_NOREPLY = "noreply.enelenergia@enel.com"
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+def load_settings():
+    """
+    Carica settings.json. Struttura attesa:
+    {
+      "senders": [
+        { "email": "...", "extract_keys": ["CHIAVE 1", "CHIAVE 2"] },
+        ...
+      ]
+    }
+    """
+    if not os.path.exists(SETTINGS_FILE):
+        print(f"ERRORE: File '{SETTINGS_FILE}' non trovato.")
+        print("Crea il file con la lista dei mittenti e delle chiavi da estrarre.")
+        sys.exit(1)
+
+    with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+        settings = json.load(f)
+
+    senders = settings.get("senders", [])
+    if not senders:
+        print(f"ERRORE: Nessun mittente configurato in '{SETTINGS_FILE}'.")
+        sys.exit(1)
+
+    return senders
+
+
+def collect_all_keys(senders_config):
+    """Restituisce la lista ordinata di tutte le chiavi uniche tra i mittenti."""
+    seen = {}
+    for s in senders_config:
+        for key in s.get("extract_keys", []):
+            seen[key] = None  # dict per preservare l'ordine di inserimento
+    return list(seen)
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +81,7 @@ SENDER_NOREPLY = "noreply.enelenergia@enel.com"
 # ---------------------------------------------------------------------------
 
 def authenticate():
-    """Gestisce l'autenticazione OAuth2 con Google."""
     creds = None
-
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
@@ -74,7 +92,6 @@ def authenticate():
         else:
             if not os.path.exists(CREDENTIALS_FILE):
                 print(f"ERRORE: File '{CREDENTIALS_FILE}' non trovato!")
-                print("Scaricalo dalla Google Cloud Console (vedi istruzioni nel file).")
                 sys.exit(1)
             print("Apertura browser per autorizzazione...")
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
@@ -88,21 +105,19 @@ def authenticate():
 
 
 # ---------------------------------------------------------------------------
-# Utilità di parsing
+# Parsing
 # ---------------------------------------------------------------------------
 
 def parse_date(date_str):
-    """Converte la stringa data dell'header in oggetto datetime."""
     if not date_str:
         return None
     date_str = re.sub(r'\s*\([^)]*\)\s*$', '', date_str.strip())
-    formats = [
+    for fmt in (
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S",
         "%d %b %Y %H:%M:%S %z",
         "%d %b %Y %H:%M:%S",
-    ]
-    for fmt in formats:
+    ):
         try:
             return datetime.strptime(date_str, fmt)
         except ValueError:
@@ -111,7 +126,6 @@ def parse_date(date_str):
 
 
 class _HTMLStripper(HTMLParser):
-    """Estrae solo il testo da una stringa HTML."""
     def __init__(self):
         super().__init__()
         self._parts = []
@@ -124,78 +138,82 @@ class _HTMLStripper(HTMLParser):
 
 
 def _html_to_text(html_content):
-    stripper = _HTMLStripper()
-    stripper.feed(html_content)
-    return stripper.get_text()
+    s = _HTMLStripper()
+    s.feed(html_content)
+    return s.get_text()
 
 
 def extract_body_text(payload):
-    """
-    Estrae ricorsivamente il testo dal payload del messaggio Gmail.
-    Preferisce text/plain; ricade su text/html se non disponibile.
-    """
-    mime_type = payload.get("mimeType", "")
-    parts = payload.get("parts", [])
+    """Estrae ricorsivamente il testo dal payload Gmail (plain > html > multipart)."""
+    mime = payload.get("mimeType", "")
 
-    if mime_type == "text/plain":
+    if mime == "text/plain":
         raw = payload.get("body", {}).get("data", "")
         if raw:
             return base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
 
-    if mime_type == "text/html":
+    if mime == "text/html":
         raw = payload.get("body", {}).get("data", "")
         if raw:
-            html = base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
-            return _html_to_text(html)
+            return _html_to_text(
+                base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
+            )
 
-    # multipart: cerca prima text/plain, poi text/html tra le parti
-    plain_text = ""
-    html_text = ""
-    for part in parts:
+    plain, html = "", ""
+    for part in payload.get("parts", []):
         pt = part.get("mimeType", "")
-        if pt == "text/plain":
-            raw = part.get("body", {}).get("data", "")
-            if raw:
-                plain_text = base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
-        elif pt == "text/html":
-            raw = part.get("body", {}).get("data", "")
-            if raw:
-                html_content = base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
-                html_text = _html_to_text(html_content)
+        raw = part.get("body", {}).get("data", "")
+        if pt == "text/plain" and raw:
+            plain = base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
+        elif pt == "text/html" and raw:
+            html = _html_to_text(
+                base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
+            )
         elif part.get("parts"):
-            # multipart annidato
             nested = extract_body_text(part)
-            if nested:
-                plain_text = plain_text or nested
+            plain = plain or nested
 
-    return plain_text or html_text
+    return plain or html
 
 
-def extract_totale_da_pagare(text):
+def extract_value_for_key(text, key):
     """
-    Cerca 'TOTALE DA PAGARE' nel testo e restituisce l'importo associato.
-    Formato atteso: es. "123,45 €" oppure "€ 123,45" oppure "123.45€"
+    Cerca `key` nel testo e restituisce il valore associato.
+    Strategia:
+      1. Importo con simbolo €  (es. "123,45 €" o "€ 123,45")
+      2. Numero decimale generico (es. "123,45" o "123.45")
+      3. Prima parola/token non vuoto dopo la chiave
     """
     if not text:
         return ""
 
-    # Normalizza spazi multipli
-    text = re.sub(r"\s+", " ", text)
+    normalized = re.sub(r"\s+", " ", text)
+    escaped_key = re.escape(key)
 
-    patterns = [
-        # "TOTALE DA PAGARE ... € 123,45" oppure "TOTALE DA PAGARE ... 123,45 €"
-        r"TOTALE\s+DA\s+PAGARE[^0-9€$]*?([\d]{1,5}[.,][\d]{2})\s*€",
-        r"TOTALE\s+DA\s+PAGARE[^0-9€$]*?€\s*([\d]{1,5}[.,][\d]{2})",
-        # fallback senza simbolo €
-        r"TOTALE\s+DA\s+PAGARE[^0-9]*?([\d]{1,5}[.,][\d]{2})",
-    ]
+    # 1. importo con €
+    for pattern in (
+        rf"{escaped_key}[^0-9€]*?([\d]{{1,6}}[.,][\d]{{2}})\s*€",
+        rf"{escaped_key}[^€]*?€\s*([\d]{{1,6}}[.,][\d]{{2}})",
+    ):
+        m = re.search(pattern, normalized, re.IGNORECASE)
+        if m:
+            return f"€ {m.group(1).strip()}"
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            amount = match.group(1).strip()
-            # Normalizza separatore decimale in formato italiano (virgola)
-            return f"€ {amount}"
+    # 2. numero decimale senza €
+    m = re.search(
+        rf"{escaped_key}[^0-9]*?([\d]{{1,6}}[.,][\d]{{2}})",
+        normalized, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).strip()
+
+    # 3. primo token non vuoto dopo la chiave
+    m = re.search(
+        rf"{escaped_key}\s*[:\-]?\s*(\S{{1,60}})",
+        normalized, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).strip()
 
     return ""
 
@@ -205,9 +223,7 @@ def extract_totale_da_pagare(text):
 # ---------------------------------------------------------------------------
 
 def _list_message_ids(service, sender):
-    """Restituisce tutti gli ID messaggi del mittente dato."""
-    ids = []
-    page_token = None
+    ids, page_token = [], None
     while True:
         params = {"userId": "me", "maxResults": BATCH_SIZE, "q": f"from:{sender}"}
         if page_token:
@@ -220,24 +236,25 @@ def _list_message_ids(service, sender):
     return ids
 
 
-def fetch_all_emails(service):
-    """
-    Recupera email da entrambi i mittenti Enel.
-    Per noreply.enelenergia@enel.com scarica il corpo completo
-    per estrarre il totale da pagare.
-    """
+def fetch_all_emails(service, senders_config):
+    """Recupera email per ogni mittente configurato ed estrae le chiavi richieste."""
     all_emails = []
 
-    for sender in [SENDER_SANDSIV, SENDER_NOREPLY]:
-        needs_body = sender == SENDER_NOREPLY
+    for sender_cfg in senders_config:
+        sender     = sender_cfg["email"]
+        keys       = sender_cfg.get("extract_keys", [])
+        needs_body = bool(keys)
+
         print(f"\nRicerca email da: {sender}")
+        if keys:
+            print(f"  Chiavi da estrarre: {', '.join(keys)}")
 
         msg_ids = _list_message_ids(service, sender)
         print(f"  Trovati {len(msg_ids)} messaggi — scaricamento dettagli...")
 
         for i, msg_info in enumerate(msg_ids, 1):
             try:
-                fmt = "full" if needs_body else "metadata"
+                fmt    = "full" if needs_body else "metadata"
                 kwargs = {"userId": "me", "id": msg_info["id"], "format": fmt}
                 if not needs_body:
                     kwargs["metadataHeaders"] = ["From", "Subject", "Date"]
@@ -249,31 +266,28 @@ def fetch_all_emails(service):
                     for h in msg.get("payload", {}).get("headers", [])
                 }
 
-                totale = ""
+                extracted = {}
                 if needs_body:
                     body_text = extract_body_text(msg.get("payload", {}))
-                    totale = extract_totale_da_pagare(body_text)
-
-                parsed_date = parse_date(headers.get("date", ""))
+                    for key in keys:
+                        extracted[key] = extract_value_for_key(body_text, key)
 
                 all_emails.append({
-                    "id": msg_info["id"],
-                    "sender_key": sender,
-                    "from": headers.get("from", sender),
-                    "subject": headers.get("subject", "(nessun oggetto)"),
-                    "date_raw": headers.get("date", ""),
-                    "date": parsed_date,
-                    "snippet": msg.get("snippet", ""),
-                    "totale_da_pagare": totale,
+                    "sender_email": sender,
+                    "from":         headers.get("from", sender),
+                    "subject":      headers.get("subject", "(nessun oggetto)"),
+                    "date_raw":     headers.get("date", ""),
+                    "date":         parse_date(headers.get("date", "")),
+                    "snippet":      msg.get("snippet", ""),
+                    "extracted":    extracted,   # { "CHIAVE": "valore", ... }
                 })
 
                 if i % 50 == 0 or i == len(msg_ids):
-                    print(f"  {i}/{len(msg_ids)} messaggi elaborati")
+                    print(f"  {i}/{len(msg_ids)} elaborati")
 
             except Exception as e:
                 print(f"  Errore nel messaggio {msg_info['id']}: {e}")
 
-    # Ordina per data decrescente
     all_emails.sort(key=lambda x: x["date"] or datetime.min, reverse=True)
     print(f"\nRecupero completato: {len(all_emails)} email totali.\n")
     return all_emails
@@ -283,8 +297,12 @@ def fetch_all_emails(service):
 # Excel
 # ---------------------------------------------------------------------------
 
-def create_excel_report(emails, output_file):
-    """Crea il file Excel con i dettagli delle email."""
+def create_excel_report(emails, all_keys, output_file):
+    """
+    Crea il file Excel.
+    Colonne fisse: #, Data, Mittente, Oggetto, Anteprima
+    Colonne dinamiche: una per ogni chiave in all_keys
+    """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -293,33 +311,33 @@ def create_excel_report(emails, output_file):
     ws = wb.active
     ws.title = "Email Enel"
 
-    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill("solid", fgColor="C0392B")
+    header_font  = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+    header_fill  = PatternFill("solid", fgColor="C0392B")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    data_font = Font(name="Arial", size=10)
-    amount_font = Font(name="Arial", size=10, bold=True, color="1A5276")
-    center_top = Alignment(horizontal="center", vertical="top")
-    left_wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    right_top = Alignment(horizontal="right", vertical="top")
-    thin_border = Border(
-        left=Side(style="thin", color="D0D0D0"),
-        right=Side(style="thin", color="D0D0D0"),
-        top=Side(style="thin", color="D0D0D0"),
-        bottom=Side(style="thin", color="D0D0D0"),
+    data_font    = Font(name="Arial", size=10)
+    value_font   = Font(name="Arial", size=10, bold=True, color="1A5276")
+    center_top   = Alignment(horizontal="center", vertical="top")
+    left_wrap    = Alignment(horizontal="left",   vertical="top", wrap_text=True)
+    right_top    = Alignment(horizontal="right",  vertical="top")
+    thin_border  = Border(
+        left=Side(style="thin", color="D0D0D0"), right=Side(style="thin", color="D0D0D0"),
+        top=Side(style="thin", color="D0D0D0"),  bottom=Side(style="thin", color="D0D0D0"),
     )
     alt_fill = PatternFill("solid", fgColor="FDECEA")
 
-    # Colonne: #, Data, Mittente, Oggetto, Anteprima, Totale da pagare
-    col_defs = [
-        ("#",               5,  center_top),
-        ("Data",           22,  center_top),
-        ("Mittente",       30,  left_wrap),
-        ("Oggetto",        50,  left_wrap),
-        ("Anteprima",      70,  left_wrap),
-        ("Totale da pagare", 18, right_top),
+    # Colonne fisse
+    fixed_cols = [
+        ("#",         5,  center_top, data_font),
+        ("Data",     22,  center_top, data_font),
+        ("Mittente", 30,  left_wrap,  data_font),
+        ("Oggetto",  50,  left_wrap,  data_font),
+        ("Anteprima",70,  left_wrap,  data_font),
     ]
+    # Colonne dinamiche (una per chiave)
+    dynamic_cols = [(key, 20, right_top, value_font) for key in all_keys]
+    all_cols = fixed_cols + dynamic_cols
 
-    for col, (title, width, _) in enumerate(col_defs, 1):
+    for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
         cell.font = header_font
         cell.fill = header_fill
@@ -330,24 +348,25 @@ def create_excel_report(emails, output_file):
     ws.row_dimensions[1].height = 20
 
     for idx, email in enumerate(emails, 1):
-        row = idx + 1
+        row  = idx + 1
         fill = alt_fill if idx % 2 == 0 else None
 
-        date_value = email["date"]
-        date_display = (
-            date_value.strftime("%d/%m/%Y %H:%M") if date_value else email["date_raw"]
-        )
+        date_val = email["date"]
+        date_str = date_val.strftime("%d/%m/%Y %H:%M") if date_val else email["date_raw"]
 
-        cells_data = [
-            (idx,                       col_defs[0][2], data_font),
-            (date_display,              col_defs[1][2], data_font),
-            (email["sender_key"],       col_defs[2][2], data_font),
-            (email["subject"],          col_defs[3][2], data_font),
-            (email["snippet"],          col_defs[4][2], data_font),
-            (email["totale_da_pagare"], col_defs[5][2], amount_font),
+        row_values = [
+            (idx,                  center_top, data_font),
+            (date_str,             center_top, data_font),
+            (email["sender_email"],left_wrap,  data_font),
+            (email["subject"],     left_wrap,  data_font),
+            (email["snippet"],     left_wrap,  data_font),
         ]
+        for key in all_keys:
+            row_values.append(
+                (email["extracted"].get(key, ""), right_top, value_font)
+            )
 
-        for col, (value, align, font) in enumerate(cells_data, 1):
+        for col, (value, align, font) in enumerate(row_values, 1):
             c = ws.cell(row=row, column=col, value=value)
             c.font = font
             c.alignment = align
@@ -358,8 +377,8 @@ def create_excel_report(emails, output_file):
         ws.row_dimensions[row].height = 40
 
     ws.freeze_panes = "A2"
-    last_row = len(emails) + 1
-    ws.auto_filter.ref = f"A1:F{last_row}"
+    last_col = get_column_letter(len(all_cols))
+    ws.auto_filter.ref = f"A1:{last_col}{len(emails) + 1}"
 
     wb.save(output_file)
     print(f"File Excel salvato: {output_file}")
@@ -370,35 +389,40 @@ def create_excel_report(emails, output_file):
 # ---------------------------------------------------------------------------
 
 def main():
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"enel_emails_{timestamp}.xlsx"
+    senders_config = load_settings()
+    all_keys       = collect_all_keys(senders_config)
+    timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file    = f"enel_emails_{timestamp}.xlsx"
 
     print("=" * 60)
     print("   Gmail Utilities Bill Retrieve")
-    print(f"   Mittenti: {SENDER_SANDSIV}")
-    print(f"             {SENDER_NOREPLY}")
+    for s in senders_config:
+        keys_str = ", ".join(s.get("extract_keys", [])) or "—"
+        print(f"   • {s['email']}  [{keys_str}]")
     print("=" * 60)
 
-    creds = authenticate()
+    creds   = authenticate()
     service = build("gmail", "v1", credentials=creds)
 
     profile = service.users().getProfile(userId="me").execute()
     print(f"\nAccount: {profile.get('emailAddress', 'N/A')}")
 
-    emails = fetch_all_emails(service)
+    emails = fetch_all_emails(service, senders_config)
 
     if not emails:
         print("Nessuna email trovata.")
         return
 
-    create_excel_report(emails, output_file)
+    create_excel_report(emails, all_keys, output_file)
 
     print("\nPrime 10 email (più recenti):")
     print("-" * 60)
     for i, email in enumerate(emails[:10], 1):
-        date_str = email["date"].strftime("%d/%m/%Y") if email["date"] else "N/D"
-        totale = f"  →  {email['totale_da_pagare']}" if email["totale_da_pagare"] else ""
-        print(f"  {i:2}. [{date_str}] {email['subject'][:40]}{totale}")
+        date_str  = email["date"].strftime("%d/%m/%Y") if email["date"] else "N/D"
+        extras    = "  →  " + "  |  ".join(
+            f"{k}: {v}" for k, v in email["extracted"].items() if v
+        ) if email["extracted"] else ""
+        print(f"  {i:2}. [{date_str}] {email['subject'][:40]}{extras}")
 
     print(f"\nFile generato: {output_file}")
 

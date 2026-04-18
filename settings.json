@@ -1,0 +1,12 @@
+{
+  "senders": [
+    {
+      "email": "enelenergia@enel.sandsiv.com",
+      "extract_keys": []
+    },
+    {
+      "email": "noreply.enelenergia@enel.com",
+      "extract_keys": ["TOTALE DA PAGARE"]
+    }
+  ]
+}
