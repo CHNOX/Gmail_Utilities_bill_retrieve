@@ -1,0 +1,19 @@
+# OAuth2 credentials - DO NOT COMMIT
+credentials.json
+token.json
+
+# Output files
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
