@@ -652,7 +652,7 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
         ("Anteprima", 75,  left_wrap,  data_font),
     ]
     dynamic_cols  = [(key, 22, right_top, value_font) for key in keys]
-    totale_col    = [("TOTALE DEFINITIVO", 22, right_top, value_font)] if len(keys) > 1 else []
+    totale_col    = [("TOTALE DEFINITIVO", 22, right_top, value_font)]
     log_col       = [("Log ricerca", 55, left_wrap, log_font)]
     all_cols      = fixed_cols + dynamic_cols + totale_col + log_col
 
@@ -681,7 +681,7 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
         ]
         for key in keys:
             row_values.append((email["extracted"].get(key, ""), right_top, value_font, fill))
-        if len(keys) > 1:
+        if keys:
             amounts   = [_parse_amount(email["extracted"].get(k, "")) for k in keys]
             valid     = [a for a in amounts if a is not None]
             max_val   = max(valid) if valid else None
