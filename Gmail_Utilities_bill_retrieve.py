@@ -452,89 +452,75 @@ def fetch_all_emails(service, senders_config):
 # Excel
 # ---------------------------------------------------------------------------
 
-def create_excel_report(emails, all_keys, output_file):
+def _make_sheet_name(sender_email, existing_names):
     """
-    Crea il file Excel.
-    Colonne fisse: #, Data, Mittente, Oggetto, Anteprima
-    Colonne dinamiche: una per ogni chiave in all_keys
+    Genera un nome foglio valido per Excel (max 31 chars, no \\ / ? * [ ] :).
+    Se il nome è già usato aggiunge un suffisso numerico.
     """
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    clean = re.sub(r'[\\/?*\[\]:]', '_', sender_email)[:31]
+    if clean not in existing_names:
+        return clean
+    for i in range(2, 100):
+        candidate = f"{clean[:28]}_{i}"
+        if candidate not in existing_names:
+            return candidate
+    return clean  # fallback (non dovrebbe mai accadere)
+
+
+def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
+    """Crea un foglio Excel per un singolo mittente."""
     from openpyxl.utils import get_column_letter
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Email Enel"
+    header_font, header_fill, header_align, \
+    data_font, value_font, log_font, \
+    center_top, left_wrap, right_top, \
+    thin_border, alt_fill, log_alt_fill = styles
 
-    header_font  = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    header_fill  = PatternFill("solid", fgColor="C0392B")
-    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    data_font    = Font(name="Arial", size=10)
-    value_font   = Font(name="Arial", size=10, bold=True, color="1A5276")
-    log_font     = Font(name="Arial", size=9, italic=True, color="555555")
-    center_top   = Alignment(horizontal="center", vertical="top")
-    left_wrap    = Alignment(horizontal="left",   vertical="top", wrap_text=True)
-    right_top    = Alignment(horizontal="right",  vertical="top")
-    thin_border  = Border(
-        left=Side(style="thin", color="D0D0D0"), right=Side(style="thin", color="D0D0D0"),
-        top=Side(style="thin", color="D0D0D0"),  bottom=Side(style="thin", color="D0D0D0"),
-    )
-    alt_fill     = PatternFill("solid", fgColor="FDECEA")
-    log_alt_fill = PatternFill("solid", fgColor="F5F5F5")
+    ws = wb.create_sheet(title=sheet_name)
 
-    # Colonne fisse
+    # Colonne: senza "Mittente" (ridondante per foglio dedicato)
     fixed_cols = [
-        ("#",            5,  center_top, data_font),
-        ("Data",        22,  center_top, data_font),
-        ("Mittente",    30,  left_wrap,  data_font),
-        ("Oggetto",     50,  left_wrap,  data_font),
-        ("Anteprima",   70,  left_wrap,  data_font),
+        ("#",          5,  center_top, data_font),
+        ("Data",      22,  center_top, data_font),
+        ("Oggetto",   55,  left_wrap,  data_font),
+        ("Anteprima", 75,  left_wrap,  data_font),
     ]
-    # Colonne dinamiche (una per chiave)
-    dynamic_cols = [(key, 20, right_top, value_font) for key in all_keys]
-    # Colonna log (sempre in fondo)
-    log_col  = [("Log ricerca", 55, left_wrap, log_font)]
-    all_cols = fixed_cols + dynamic_cols + log_col
+    dynamic_cols = [(key, 22, right_top, value_font) for key in keys]
+    log_col      = [("Log ricerca", 55, left_wrap, log_font)]
+    all_cols     = fixed_cols + dynamic_cols + log_col
 
     for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
-        cell.font = header_font
-        cell.fill = header_fill
+        cell.font      = header_font
+        cell.fill      = header_fill
         cell.alignment = header_align
-        cell.border = thin_border
+        cell.border    = thin_border
         ws.column_dimensions[get_column_letter(col)].width = width
-
     ws.row_dimensions[1].height = 20
 
-    for idx, email in enumerate(emails, 1):
-        row  = idx + 1
-        fill = alt_fill if idx % 2 == 0 else None
+    for idx, email in enumerate(sender_emails, 1):
+        row      = idx + 1
+        fill     = alt_fill     if idx % 2 == 0 else None
+        log_fill = log_alt_fill if idx % 2 == 0 else None
 
         date_val = email["date"]
         date_str = date_val.strftime("%d/%m/%Y %H:%M") if date_val else email["date_raw"]
 
-        log_fill = log_alt_fill if idx % 2 == 0 else None
-
         row_values = [
-            (idx,                  center_top, data_font,  fill),
-            (date_str,             center_top, data_font,  fill),
-            (email["sender_email"],left_wrap,  data_font,  fill),
-            (email["subject"],     left_wrap,  data_font,  fill),
-            (email["snippet"],     left_wrap,  data_font,  fill),
+            (idx,               center_top, data_font,  fill),
+            (date_str,          center_top, data_font,  fill),
+            (email["subject"],  left_wrap,  data_font,  fill),
+            (email["snippet"],  left_wrap,  data_font,  fill),
         ]
-        for key in all_keys:
-            row_values.append(
-                (email["extracted"].get(key, ""), right_top, value_font, fill)
-            )
-        row_values.append(
-            (email.get("search_log", ""), left_wrap, log_font, log_fill)
-        )
+        for key in keys:
+            row_values.append((email["extracted"].get(key, ""), right_top, value_font, fill))
+        row_values.append((email.get("search_log", ""), left_wrap, log_font, log_fill))
 
         for col, (value, align, font, cell_fill) in enumerate(row_values, 1):
-            c = ws.cell(row=row, column=col, value=value)
-            c.font = font
-            c.alignment = align
-            c.border = thin_border
+            c            = ws.cell(row=row, column=col, value=value)
+            c.font       = font
+            c.alignment  = align
+            c.border     = thin_border
             if cell_fill:
                 c.fill = cell_fill
 
@@ -542,10 +528,62 @@ def create_excel_report(emails, all_keys, output_file):
 
     ws.freeze_panes = "A2"
     last_col = get_column_letter(len(all_cols))
-    ws.auto_filter.ref = f"A1:{last_col}{len(emails) + 1}"
+    ws.auto_filter.ref = f"A1:{last_col}{len(sender_emails) + 1}"
+
+
+def create_excel_report(emails, senders_config, output_file):
+    """
+    Crea il file Excel con un foglio per ogni mittente.
+    Colonne per foglio: #, Data, Oggetto, Anteprima, [chiavi mittente], Log ricerca
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from collections import defaultdict
+
+    # Stili condivisi tra tutti i fogli
+    styles = (
+        Font(name="Arial", bold=True, color="FFFFFF", size=11),   # header_font
+        PatternFill("solid", fgColor="C0392B"),                    # header_fill
+        Alignment(horizontal="center", vertical="center", wrap_text=True),  # header_align
+        Font(name="Arial", size=10),                               # data_font
+        Font(name="Arial", size=10, bold=True, color="1A5276"),    # value_font
+        Font(name="Arial", size=9, italic=True, color="555555"),   # log_font
+        Alignment(horizontal="center", vertical="top"),            # center_top
+        Alignment(horizontal="left",   vertical="top", wrap_text=True),     # left_wrap
+        Alignment(horizontal="right",  vertical="top"),            # right_top
+        Border(
+            left=Side(style="thin", color="D0D0D0"),
+            right=Side(style="thin", color="D0D0D0"),
+            top=Side(style="thin", color="D0D0D0"),
+            bottom=Side(style="thin", color="D0D0D0"),
+        ),                                                          # thin_border
+        PatternFill("solid", fgColor="FDECEA"),                    # alt_fill
+        PatternFill("solid", fgColor="F5F5F5"),                    # log_alt_fill
+    )
+
+    # Raggruppa email per mittente mantenendo l'ordine di senders_config
+    emails_by_sender = defaultdict(list)
+    for email in emails:
+        emails_by_sender[email["sender_email"]].append(email)
+
+    keys_by_sender = {s["email"]: s.get("extract_keys", []) for s in senders_config}
+
+    wb = Workbook()
+    wb.remove(wb.active)   # rimuove il foglio vuoto di default
+
+    sheet_names = []
+    for sender_cfg in senders_config:
+        sender         = sender_cfg["email"]
+        keys           = keys_by_sender.get(sender, [])
+        sender_emails  = emails_by_sender.get(sender, [])
+        sheet_name     = _make_sheet_name(sender, sheet_names)
+        sheet_names.append(sheet_name)
+
+        _write_sheet(wb, sheet_name, sender_emails, keys, styles)
+        print(f"  Foglio '{sheet_name}': {len(sender_emails)} email")
 
     wb.save(output_file)
-    print(f"File Excel salvato: {output_file}")
+    print(f"\nFile Excel salvato: {output_file}")
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +592,6 @@ def create_excel_report(emails, all_keys, output_file):
 
 def main():
     senders_config = load_settings()
-    all_keys       = collect_all_keys(senders_config)
     timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file    = f"enel_emails_{timestamp}.xlsx"
 
@@ -578,7 +615,8 @@ def main():
         print("Nessuna email trovata.")
         return
 
-    create_excel_report(emails, all_keys, output_file)
+    print("Generazione fogli Excel:")
+    create_excel_report(emails, senders_config, output_file)
 
     print("\nPrime 10 email (più recenti):")
     print("-" * 60)
