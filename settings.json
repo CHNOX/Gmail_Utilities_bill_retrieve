@@ -1,6 +1,11 @@
 {
   "_docs": {
     "_note": "Questa sezione è documentazione — viene ignorata dal programma.",
+    "date_range": {
+      "_note":  "Parametro globale opzionale: filtra le email di tutti i mittenti per data. Formato date: YYYY-MM-DD. Entrambi i campi sono opzionali.",
+      "from":   "Data iniziale inclusa (es. '2024-01-01')",
+      "to":     "Data finale inclusa (es. '2024-12-31')"
+    },
     "campi": {
       "email":        "Indirizzo email del mittente da cercare (obbligatorio)",
       "extract_keys": "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
@@ -46,6 +51,11 @@
     }
   },
 
+  "date_range": {
+    "from": "2024-01-01",
+    "to":   "2025-12-31"
+  },
+
   "senders": [
     {
       "email":        "noreply.enelenergia@enel.com",
@@ -56,7 +66,7 @@
       "email":        "fatturahera@contatti.gruppohera.it",
       "extract_keys": ["Totale da pagare"],
       "extract_from": "link",
-      "link_text":    "Scarica"
+      "link_text":    "Documento pdf"
     }
   ]
 }

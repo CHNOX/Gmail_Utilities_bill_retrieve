@@ -43,20 +43,22 @@ BATCH_SIZE        = 500
 # Settings
 # ---------------------------------------------------------------------------
 
+def _parse_date_setting(value, field_name):
+    """Valida e converte una data in formato YYYY-MM-DD; esce se il formato è errato."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"ERRORE: '{field_name}' in date_range deve essere nel formato YYYY-MM-DD (es. 2024-01-01).")
+        sys.exit(1)
+
+
 def load_settings():
     """
-    Carica settings.json. Struttura attesa:
-    {
-      "senders": [
-        {
-          "email": "...",
-          "extract_keys": ["CHIAVE 1", "CHIAVE 2"],
-          "extract_from": "body"   // "body" | "pdf" | "both"
-        },
-        ...
-      ]
-    }
-    Il campo "extract_from" è opzionale e vale "body" se omesso.
+    Carica settings.json.
+    Restituisce (senders_config, date_range) dove date_range è un dict
+    {"from": date|None, "to": date|None}.
     """
     if not os.path.exists(SETTINGS_FILE):
         print(f"ERRORE: File '{SETTINGS_FILE}' non trovato.")
@@ -71,12 +73,18 @@ def load_settings():
         print(f"ERRORE: Nessun mittente configurato in '{SETTINGS_FILE}'.")
         sys.exit(1)
 
-    # Normalizza le chiavi in uppercase per garantire ricerca case-insensitive
-    # e colonne Excel condivise tra mittenti con la stessa chiave scritta diversamente
+    # Normalizza le chiavi in uppercase (case-insensitive, colonna Excel condivisa)
     for s in senders:
         s["extract_keys"] = [k.upper() for k in s.get("extract_keys", [])]
 
-    return senders
+    # Legge il range di date globale (entrambi i campi opzionali)
+    dr_raw     = settings.get("date_range", {})
+    date_range = {
+        "from": _parse_date_setting(dr_raw.get("from"), "from"),
+        "to":   _parse_date_setting(dr_raw.get("to"),   "to"),
+    }
+
+    return senders, date_range
 
 
 def collect_all_keys(senders_config):
@@ -499,10 +507,24 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=No
 # Recupero email
 # ---------------------------------------------------------------------------
 
-def _list_message_ids(service, sender):
+def _build_query(sender, date_range):
+    """Costruisce la query Gmail con filtro mittente e range di date."""
+    q = f"from:{sender}"
+    if date_range:
+        if date_range.get("from"):
+            q += f" after:{date_range['from'].strftime('%Y/%m/%d')}"
+        if date_range.get("to"):
+            # Gmail before: è esclusivo — aggiungiamo 1 giorno per includere la data finale
+            from datetime import timedelta
+            to_inclusive = date_range["to"] + timedelta(days=1)
+            q += f" before:{to_inclusive.strftime('%Y/%m/%d')}"
+    return q
+
+
+def _list_message_ids(service, sender, date_range=None):
     ids, page_token = [], None
     while True:
-        params = {"userId": "me", "maxResults": BATCH_SIZE, "q": f"from:{sender}"}
+        params = {"userId": "me", "maxResults": BATCH_SIZE, "q": _build_query(sender, date_range)}
         if page_token:
             params["pageToken"] = page_token
         results = service.users().messages().list(**params).execute()
@@ -513,7 +535,7 @@ def _list_message_ids(service, sender):
     return ids
 
 
-def fetch_all_emails(service, senders_config):
+def fetch_all_emails(service, senders_config, date_range=None):
     """Recupera email per ogni mittente configurato ed estrae le chiavi richieste."""
     all_emails = []
 
@@ -530,7 +552,7 @@ def fetch_all_emails(service, senders_config):
             extra = f"  link_text={repr(link_text)}" if extract_from == "link" and link_text else ""
             print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {src_label}{extra}]")
 
-        msg_ids = _list_message_ids(service, sender)
+        msg_ids = _list_message_ids(service, sender, date_range)
         print(f"  Trovati {len(msg_ids)} messaggi — scaricamento dettagli...")
 
         for i, msg_info in enumerate(msg_ids, 1):
@@ -716,9 +738,9 @@ def create_excel_report(emails, senders_config, output_file):
 # ---------------------------------------------------------------------------
 
 def main():
-    senders_config = load_settings()
-    timestamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file    = f"enel_emails_{timestamp}.xlsx"
+    senders_config, date_range = load_settings()
+    timestamp                  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file                = f"enel_emails_{timestamp}.xlsx"
 
     print("=" * 60)
     print("   Gmail Utilities Bill Retrieve")
@@ -726,6 +748,10 @@ def main():
         keys_str = ", ".join(s.get("extract_keys", [])) or "—"
         src      = s.get("extract_from") or "auto"
         print(f"   • {s['email']}  [{keys_str}]  (sorgente: {src})")
+    dr_from = date_range["from"].strftime("%d/%m/%Y") if date_range["from"] else "—"
+    dr_to   = date_range["to"].strftime("%d/%m/%Y")   if date_range["to"]   else "—"
+    if date_range["from"] or date_range["to"]:
+        print(f"   Range date: dal {dr_from} al {dr_to}")
     print("=" * 60)
 
     creds   = authenticate()
@@ -734,7 +760,7 @@ def main():
     profile = service.users().getProfile(userId="me").execute()
     print(f"\nAccount: {profile.get('emailAddress', 'N/A')}")
 
-    emails = fetch_all_emails(service, senders_config)
+    emails = fetch_all_emails(service, senders_config, date_range)
 
     if not emails:
         print("Nessuna email trovata.")
