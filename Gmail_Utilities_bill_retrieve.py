@@ -286,6 +286,25 @@ def extract_body_text(payload):
     return plain or html
 
 
+def _parse_amount(value):
+    """
+    Converte un valore estratto (es. '€ 1.234,56' o '1234.56') in float.
+    Restituisce None se il valore non è numerico.
+    """
+    if not value:
+        return None
+    cleaned = re.sub(r"[€\s]", "", value)
+    # formato italiano: 1.234,56 → separatore migliaia '.' e decimale ','
+    if re.match(r"^\d{1,3}(\.\d{3})+(,\d+)?$", cleaned):
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 def extract_value_for_key(text, key):
     """
     Cerca `key` nel testo e restituisce il valore associato.
@@ -632,9 +651,10 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
         ("Oggetto",   55,  left_wrap,  data_font),
         ("Anteprima", 75,  left_wrap,  data_font),
     ]
-    dynamic_cols = [(key, 22, right_top, value_font) for key in keys]
-    log_col      = [("Log ricerca", 55, left_wrap, log_font)]
-    all_cols     = fixed_cols + dynamic_cols + log_col
+    dynamic_cols  = [(key, 22, right_top, value_font) for key in keys]
+    totale_col    = [("TOTALE DEFINITIVO", 22, right_top, value_font)] if len(keys) > 1 else []
+    log_col       = [("Log ricerca", 55, left_wrap, log_font)]
+    all_cols      = fixed_cols + dynamic_cols + totale_col + log_col
 
     for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
@@ -661,6 +681,20 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
         ]
         for key in keys:
             row_values.append((email["extracted"].get(key, ""), right_top, value_font, fill))
+        if len(keys) > 1:
+            amounts   = [_parse_amount(email["extracted"].get(k, "")) for k in keys]
+            valid     = [a for a in amounts if a is not None]
+            max_val   = max(valid) if valid else None
+            if max_val is not None:
+                # ripristina il formato del valore originale (con € se presente)
+                orig = next(
+                    email["extracted"].get(k, "") for k in keys
+                    if _parse_amount(email["extracted"].get(k, "")) == max_val
+                )
+                totale_def = orig
+            else:
+                totale_def = ""
+            row_values.append((totale_def, right_top, value_font, fill))
         row_values.append((email.get("search_log", ""), left_wrap, log_font, log_fill))
 
         for col, (value, align, font, cell_fill) in enumerate(row_values, 1):
