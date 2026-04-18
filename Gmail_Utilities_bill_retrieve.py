@@ -71,6 +71,11 @@ def load_settings():
         print(f"ERRORE: Nessun mittente configurato in '{SETTINGS_FILE}'.")
         sys.exit(1)
 
+    # Normalizza le chiavi in uppercase per garantire ricerca case-insensitive
+    # e colonne Excel condivise tra mittenti con la stessa chiave scritta diversamente
+    for s in senders:
+        s["extract_keys"] = [k.upper() for k in s.get("extract_keys", [])]
+
     return senders
 
 

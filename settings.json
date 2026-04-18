@@ -39,12 +39,14 @@
 
   "senders": [
     {
-      "email":        "enelenergia@enel.sandsiv.com",
-      "extract_keys": []
+      "email":        "noreply.enelenergia@enel.com",
+      "extract_keys": ["TOTALE DA PAGARE"],
+      "extract_from": "pdf"
     },
     {
-      "email":        "noreply.enelenergia@enel.com",
-      "extract_keys": ["TOTALE DA PAGARE"]
+      "email":        "fatturahera@contatti.gruppohera.it",
+      "extract_keys": ["Totale da pagare"],
+      "extract_from": "pdf"
     }
   ]
 }
