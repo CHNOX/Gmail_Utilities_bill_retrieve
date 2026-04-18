@@ -3,20 +3,22 @@ Gmail Utilities Bill Retrieve
 ==============================
 Legge la configurazione da settings.json e per ogni mittente:
   - recupera tutte le email
-  - estrae i valori delle chiavi configurate (es. "TOTALE DA PAGARE")
+  - estrae i valori delle chiavi configurate dal corpo email e/o dagli allegati PDF
 
 Genera un file Excel con una colonna per ogni chiave di estrazione.
 
 PREREQUISITI:
 1. Python 3.7+
-2. pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl
+2. pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl pdfplumber
 
 3. Scarica credentials.json da Google Cloud Console (vedi README).
 
-4. Configura settings.json con i mittenti e le chiavi da estrarre.
+4. Configura settings.json con i mittenti, le chiavi da estrarre e la sorgente
+   ("body", "pdf", "both").
 """
 
 import base64
+import io
 import json
 import os
 import re
@@ -46,10 +48,15 @@ def load_settings():
     Carica settings.json. Struttura attesa:
     {
       "senders": [
-        { "email": "...", "extract_keys": ["CHIAVE 1", "CHIAVE 2"] },
+        {
+          "email": "...",
+          "extract_keys": ["CHIAVE 1", "CHIAVE 2"],
+          "extract_from": "body"   // "body" | "pdf" | "both"
+        },
         ...
       ]
     }
+    Il campo "extract_from" è opzionale e vale "body" se omesso.
     """
     if not os.path.exists(SETTINGS_FILE):
         print(f"ERRORE: File '{SETTINGS_FILE}' non trovato.")
@@ -219,6 +226,65 @@ def extract_value_for_key(text, key):
 
 
 # ---------------------------------------------------------------------------
+# Estrazione testo da allegati PDF
+# ---------------------------------------------------------------------------
+
+def _iter_parts(payload):
+    """Itera ricorsivamente su tutte le parti foglia del payload Gmail."""
+    parts = payload.get("parts", [])
+    if not parts:
+        yield payload
+    else:
+        for part in parts:
+            yield from _iter_parts(part)
+
+
+def _pdf_bytes_to_text(pdf_bytes):
+    """Estrae il testo da un PDF in memoria usando pdfplumber."""
+    import pdfplumber
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+    except Exception as e:
+        print(f"    Errore lettura PDF: {e}")
+        return ""
+
+
+def get_pdf_text(service, msg_id, payload):
+    """
+    Trova tutti gli allegati PDF nel messaggio, li scarica e restituisce
+    il testo concatenato di tutte le pagine.
+    """
+    texts = []
+    for part in _iter_parts(payload):
+        filename  = part.get("filename", "")
+        mime_type = part.get("mimeType", "")
+        is_pdf    = mime_type == "application/pdf" or filename.lower().endswith(".pdf")
+        if not is_pdf:
+            continue
+
+        body          = part.get("body", {})
+        inline_data   = body.get("data", "")
+        attachment_id = body.get("attachmentId", "")
+
+        if inline_data:
+            pdf_bytes = base64.urlsafe_b64decode(inline_data + "==")
+        elif attachment_id:
+            att = service.users().messages().attachments().get(
+                userId="me", messageId=msg_id, id=attachment_id
+            ).execute()
+            pdf_bytes = base64.urlsafe_b64decode(att["data"] + "==")
+        else:
+            continue
+
+        text = _pdf_bytes_to_text(pdf_bytes)
+        if text:
+            texts.append(text)
+
+    return "\n".join(texts)
+
+
+# ---------------------------------------------------------------------------
 # Recupero email
 # ---------------------------------------------------------------------------
 
@@ -241,36 +307,43 @@ def fetch_all_emails(service, senders_config):
     all_emails = []
 
     for sender_cfg in senders_config:
-        sender     = sender_cfg["email"]
-        keys       = sender_cfg.get("extract_keys", [])
-        needs_body = bool(keys)
+        sender       = sender_cfg["email"]
+        keys         = sender_cfg.get("extract_keys", [])
+        extract_from = sender_cfg.get("extract_from", "body")   # "body" | "pdf" | "both"
+        needs_full   = bool(keys)   # format=full se c'è almeno una chiave da estrarre
 
         print(f"\nRicerca email da: {sender}")
         if keys:
-            print(f"  Chiavi da estrarre: {', '.join(keys)}")
+            print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {extract_from}]")
 
         msg_ids = _list_message_ids(service, sender)
         print(f"  Trovati {len(msg_ids)} messaggi — scaricamento dettagli...")
 
         for i, msg_info in enumerate(msg_ids, 1):
             try:
-                fmt    = "full" if needs_body else "metadata"
+                fmt    = "full" if needs_full else "metadata"
                 kwargs = {"userId": "me", "id": msg_info["id"], "format": fmt}
-                if not needs_body:
+                if not needs_full:
                     kwargs["metadataHeaders"] = ["From", "Subject", "Date"]
 
-                msg = service.users().messages().get(**kwargs).execute()
-
+                msg     = service.users().messages().get(**kwargs).execute()
+                payload = msg.get("payload", {})
                 headers = {
                     h["name"].lower(): h["value"]
-                    for h in msg.get("payload", {}).get("headers", [])
+                    for h in payload.get("headers", [])
                 }
 
                 extracted = {}
-                if needs_body:
-                    body_text = extract_body_text(msg.get("payload", {}))
+                if keys:
+                    # Costruisce il testo sorgente in base a extract_from
+                    source_text = ""
+                    if extract_from in ("body", "both"):
+                        source_text += extract_body_text(payload)
+                    if extract_from in ("pdf", "both"):
+                        source_text += "\n" + get_pdf_text(service, msg_info["id"], payload)
+
                     for key in keys:
-                        extracted[key] = extract_value_for_key(body_text, key)
+                        extracted[key] = extract_value_for_key(source_text, key)
 
                 all_emails.append({
                     "sender_email": sender,
@@ -279,7 +352,7 @@ def fetch_all_emails(service, senders_config):
                     "date_raw":     headers.get("date", ""),
                     "date":         parse_date(headers.get("date", "")),
                     "snippet":      msg.get("snippet", ""),
-                    "extracted":    extracted,   # { "CHIAVE": "valore", ... }
+                    "extracted":    extracted,
                 })
 
                 if i % 50 == 0 or i == len(msg_ids):
@@ -398,7 +471,8 @@ def main():
     print("   Gmail Utilities Bill Retrieve")
     for s in senders_config:
         keys_str = ", ".join(s.get("extract_keys", [])) or "—"
-        print(f"   • {s['email']}  [{keys_str}]")
+        src      = s.get("extract_from", "body")
+        print(f"   • {s['email']}  [{keys_str}]  (sorgente: {src})")
     print("=" * 60)
 
     creds   = authenticate()
