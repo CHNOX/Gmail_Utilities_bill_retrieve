@@ -250,38 +250,121 @@ def _pdf_bytes_to_text(pdf_bytes):
         return ""
 
 
-def get_pdf_text(service, msg_id, payload):
-    """
-    Trova tutti gli allegati PDF nel messaggio, li scarica e restituisce
-    il testo concatenato di tutte le pagine.
-    """
-    texts = []
+def _find_pdf_parts(payload):
+    """Restituisce lista di (part, filename) per tutti gli allegati PDF nel messaggio."""
+    results = []
     for part in _iter_parts(payload):
         filename  = part.get("filename", "")
         mime_type = part.get("mimeType", "")
         is_pdf    = mime_type == "application/pdf" or filename.lower().endswith(".pdf")
-        if not is_pdf:
-            continue
+        body      = part.get("body", {})
+        has_data  = bool(body.get("data") or body.get("attachmentId"))
+        if is_pdf and has_data:
+            results.append((part, filename or "allegato.pdf"))
+    return results
 
-        body          = part.get("body", {})
-        inline_data   = body.get("data", "")
-        attachment_id = body.get("attachmentId", "")
 
-        if inline_data:
-            pdf_bytes = base64.urlsafe_b64decode(inline_data + "==")
-        elif attachment_id:
-            att = service.users().messages().attachments().get(
-                userId="me", messageId=msg_id, id=attachment_id
-            ).execute()
-            pdf_bytes = base64.urlsafe_b64decode(att["data"] + "==")
-        else:
-            continue
+def _download_pdf_text(service, msg_id, part):
+    """Scarica un singolo allegato PDF e ne restituisce il testo."""
+    body          = part.get("body", {})
+    inline_data   = body.get("data", "")
+    attachment_id = body.get("attachmentId", "")
+    if inline_data:
+        pdf_bytes = base64.urlsafe_b64decode(inline_data + "==")
+    elif attachment_id:
+        att = service.users().messages().attachments().get(
+            userId="me", messageId=msg_id, id=attachment_id
+        ).execute()
+        pdf_bytes = base64.urlsafe_b64decode(att["data"] + "==")
+    else:
+        return ""
+    return _pdf_bytes_to_text(pdf_bytes)
 
-        text = _pdf_bytes_to_text(pdf_bytes)
-        if text:
-            texts.append(text)
 
-    return "\n".join(texts)
+# ---------------------------------------------------------------------------
+# Estrazione con log
+# ---------------------------------------------------------------------------
+
+def _extract_with_log(service, msg_id, payload, keys, extract_from):
+    """
+    Estrae i valori delle chiavi e genera un log descrittivo per ogni chiave.
+
+    extract_from:
+      "body"  → cerca solo nel corpo email
+      "pdf"   → cerca solo negli allegati PDF
+      "both"  → cerca nel corpo + PDF (testo unificato)
+      None/"" → automatico: corpo prima, poi PDF se la chiave non è trovata
+
+    Restituisce (extracted: dict, search_log: str).
+    """
+    if not keys:
+        return {}, ""
+
+    pdf_parts = _find_pdf_parts(payload)
+    has_pdfs  = bool(pdf_parts)
+    pdf_names = ", ".join(fname for _, fname in pdf_parts) if has_pdfs else "—"
+
+    extracted = {}
+    log_parts = []
+
+    # Lazy loaders — il testo viene calcolato/scaricato al primo accesso
+    _body_cache = [None]
+    _pdf_cache  = [None]
+
+    def _body():
+        if _body_cache[0] is None:
+            _body_cache[0] = extract_body_text(payload)
+        return _body_cache[0]
+
+    def _pdf():
+        if _pdf_cache[0] is None:
+            if has_pdfs:
+                texts = [_download_pdf_text(service, msg_id, p) for p, _ in pdf_parts]
+                _pdf_cache[0] = "\n".join(t for t in texts if t)
+            else:
+                _pdf_cache[0] = ""
+        return _pdf_cache[0]
+
+    for key in keys:
+        if extract_from == "body":
+            val = extract_value_for_key(_body(), key)
+            extracted[key] = val
+            log_parts.append(f"{key}: corpo {'✓' if val else '✗ non trovato'}")
+
+        elif extract_from == "pdf":
+            val = extract_value_for_key(_pdf(), key)
+            extracted[key] = val
+            if val:
+                log_parts.append(f"{key}: PDF ✓ ({pdf_names})")
+            elif has_pdfs:
+                log_parts.append(f"{key}: PDF ✗ non trovato ({pdf_names})")
+            else:
+                log_parts.append(f"{key}: PDF ✗ nessun allegato")
+
+        elif extract_from == "both":
+            val = extract_value_for_key(_body() + "\n" + _pdf(), key)
+            extracted[key] = val
+            src = "corpo+PDF" if has_pdfs else "corpo"
+            log_parts.append(f"{key}: {src} {'✓' if val else '✗ non trovato'}")
+
+        else:  # auto
+            val = extract_value_for_key(_body(), key)
+            if val:
+                extracted[key] = val
+                log_parts.append(f"{key}: corpo ✓")
+            else:
+                val = extract_value_for_key(_pdf(), key)
+                if val:
+                    extracted[key] = val
+                    log_parts.append(f"{key}: PDF ✓ ({pdf_names})")
+                elif has_pdfs:
+                    extracted[key] = ""
+                    log_parts.append(f"{key}: ✗ non trovato (PDF: {pdf_names})")
+                else:
+                    extracted[key] = ""
+                    log_parts.append(f"{key}: ✗ non trovato (no allegati PDF)")
+
+    return extracted, " | ".join(log_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +392,13 @@ def fetch_all_emails(service, senders_config):
     for sender_cfg in senders_config:
         sender       = sender_cfg["email"]
         keys         = sender_cfg.get("extract_keys", [])
-        extract_from = sender_cfg.get("extract_from", "body")   # "body" | "pdf" | "both"
-        needs_full   = bool(keys)   # format=full se c'è almeno una chiave da estrarre
+        extract_from = sender_cfg.get("extract_from", "")  # "" = auto
+        needs_full   = bool(keys)
 
+        src_label = extract_from if extract_from else "auto"
         print(f"\nRicerca email da: {sender}")
         if keys:
-            print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {extract_from}]")
+            print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {src_label}]")
 
         msg_ids = _list_message_ids(service, sender)
         print(f"  Trovati {len(msg_ids)} messaggi — scaricamento dettagli...")
@@ -333,17 +417,9 @@ def fetch_all_emails(service, senders_config):
                     for h in payload.get("headers", [])
                 }
 
-                extracted = {}
-                if keys:
-                    # Costruisce il testo sorgente in base a extract_from
-                    source_text = ""
-                    if extract_from in ("body", "both"):
-                        source_text += extract_body_text(payload)
-                    if extract_from in ("pdf", "both"):
-                        source_text += "\n" + get_pdf_text(service, msg_info["id"], payload)
-
-                    for key in keys:
-                        extracted[key] = extract_value_for_key(source_text, key)
+                extracted, search_log = _extract_with_log(
+                    service, msg_info["id"], payload, keys, extract_from
+                )
 
                 all_emails.append({
                     "sender_email": sender,
@@ -353,6 +429,7 @@ def fetch_all_emails(service, senders_config):
                     "date":         parse_date(headers.get("date", "")),
                     "snippet":      msg.get("snippet", ""),
                     "extracted":    extracted,
+                    "search_log":   search_log,
                 })
 
                 if i % 50 == 0 or i == len(msg_ids):
@@ -389,6 +466,7 @@ def create_excel_report(emails, all_keys, output_file):
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     data_font    = Font(name="Arial", size=10)
     value_font   = Font(name="Arial", size=10, bold=True, color="1A5276")
+    log_font     = Font(name="Arial", size=9, italic=True, color="555555")
     center_top   = Alignment(horizontal="center", vertical="top")
     left_wrap    = Alignment(horizontal="left",   vertical="top", wrap_text=True)
     right_top    = Alignment(horizontal="right",  vertical="top")
@@ -396,19 +474,22 @@ def create_excel_report(emails, all_keys, output_file):
         left=Side(style="thin", color="D0D0D0"), right=Side(style="thin", color="D0D0D0"),
         top=Side(style="thin", color="D0D0D0"),  bottom=Side(style="thin", color="D0D0D0"),
     )
-    alt_fill = PatternFill("solid", fgColor="FDECEA")
+    alt_fill     = PatternFill("solid", fgColor="FDECEA")
+    log_alt_fill = PatternFill("solid", fgColor="F5F5F5")
 
     # Colonne fisse
     fixed_cols = [
-        ("#",         5,  center_top, data_font),
-        ("Data",     22,  center_top, data_font),
-        ("Mittente", 30,  left_wrap,  data_font),
-        ("Oggetto",  50,  left_wrap,  data_font),
-        ("Anteprima",70,  left_wrap,  data_font),
+        ("#",            5,  center_top, data_font),
+        ("Data",        22,  center_top, data_font),
+        ("Mittente",    30,  left_wrap,  data_font),
+        ("Oggetto",     50,  left_wrap,  data_font),
+        ("Anteprima",   70,  left_wrap,  data_font),
     ]
     # Colonne dinamiche (una per chiave)
     dynamic_cols = [(key, 20, right_top, value_font) for key in all_keys]
-    all_cols = fixed_cols + dynamic_cols
+    # Colonna log (sempre in fondo)
+    log_col  = [("Log ricerca", 55, left_wrap, log_font)]
+    all_cols = fixed_cols + dynamic_cols + log_col
 
     for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
@@ -427,25 +508,30 @@ def create_excel_report(emails, all_keys, output_file):
         date_val = email["date"]
         date_str = date_val.strftime("%d/%m/%Y %H:%M") if date_val else email["date_raw"]
 
+        log_fill = log_alt_fill if idx % 2 == 0 else None
+
         row_values = [
-            (idx,                  center_top, data_font),
-            (date_str,             center_top, data_font),
-            (email["sender_email"],left_wrap,  data_font),
-            (email["subject"],     left_wrap,  data_font),
-            (email["snippet"],     left_wrap,  data_font),
+            (idx,                  center_top, data_font,  fill),
+            (date_str,             center_top, data_font,  fill),
+            (email["sender_email"],left_wrap,  data_font,  fill),
+            (email["subject"],     left_wrap,  data_font,  fill),
+            (email["snippet"],     left_wrap,  data_font,  fill),
         ]
         for key in all_keys:
             row_values.append(
-                (email["extracted"].get(key, ""), right_top, value_font)
+                (email["extracted"].get(key, ""), right_top, value_font, fill)
             )
+        row_values.append(
+            (email.get("search_log", ""), left_wrap, log_font, log_fill)
+        )
 
-        for col, (value, align, font) in enumerate(row_values, 1):
+        for col, (value, align, font, cell_fill) in enumerate(row_values, 1):
             c = ws.cell(row=row, column=col, value=value)
             c.font = font
             c.alignment = align
             c.border = thin_border
-            if fill:
-                c.fill = fill
+            if cell_fill:
+                c.fill = cell_fill
 
         ws.row_dimensions[row].height = 40
 
@@ -471,7 +557,7 @@ def main():
     print("   Gmail Utilities Bill Retrieve")
     for s in senders_config:
         keys_str = ", ".join(s.get("extract_keys", [])) or "—"
-        src      = s.get("extract_from", "body")
+        src      = s.get("extract_from") or "auto"
         print(f"   • {s['email']}  [{keys_str}]  (sorgente: {src})")
     print("=" * 60)
 
