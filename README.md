@@ -1,23 +1,25 @@
 # Gmail Utilities Bill Retrieve
 
-Recupera **tutte le email** da uno o più mittenti configurati in `settings.json` e genera un file **Excel** con data, oggetto, anteprima e — per i mittenti che lo prevedono — i valori estratti automaticamente dal corpo dell'email (es. *TOTALE DA PAGARE*).
+Recupera **tutte le email** da uno o più mittenti configurati in `settings.json` e genera un file **Excel** con data, oggetto, anteprima, i valori estratti automaticamente (es. *TOTALE DA PAGARE*) e una colonna di **log** che indica per ogni email dove la chiave è stata trovata (corpo, allegato PDF, o non trovata).
 
-I mittenti e le chiavi di estrazione si configurano liberamente senza toccare il codice.
+I mittenti, le chiavi di estrazione e la sorgente di ricerca si configurano liberamente senza toccare il codice.
 
 ## Cosa produce
 
-Il file Excel generato (`enel_emails_YYYYMMDD_HHMMSS.xlsx`) contiene le colonne fisse più una colonna aggiuntiva per ogni chiave di estrazione definita in `settings.json`:
+Il file Excel generato (`enel_emails_YYYYMMDD_HHMMSS.xlsx`) contiene le colonne fisse, una colonna per ogni chiave di estrazione e sempre in fondo la colonna **Log ricerca**:
 
-| # | Data | Mittente | Oggetto | Anteprima | TOTALE DA PAGARE |
-|---|------|----------|---------|-----------|-----------------|
-| 1 | 15/04/2026 08:32 | noreply.enelenergia@enel.com | La tua bolletta di aprile | Gentile cliente… | € 87,43 |
-| 2 | 14/03/2026 09:10 | enelenergia@enel.sandsiv.com | Riepilogo consumi marzo | In allegato trovi… | |
-| … | … | … | … | … | … |
+| # | Data | Mittente | Oggetto | Anteprima | TOTALE DA PAGARE | Log ricerca |
+|---|------|----------|---------|-----------|-----------------|-------------|
+| 1 | 15/04/2026 08:32 | noreply.enelenergia@enel.com | La tua bolletta di aprile | Gentile cliente… | € 87,43 | TOTALE DA PAGARE: corpo ✓ |
+| 2 | 14/03/2026 09:10 | noreply.enelenergia@enel.com | Bolletta marzo — vedi allegato | In allegato… | € 74,10 | TOTALE DA PAGARE: PDF ✓ (bolletta.pdf) |
+| 3 | 10/02/2026 11:05 | enelenergia@enel.sandsiv.com | Riepilogo consumi | In allegato trovi… | | |
+| … | … | … | … | … | … | … |
 
 - Ordinate dalla email più recente alla meno recente
 - Colonne di estrazione aggiunte dinamicamente in base a `settings.json`
+- Colonna **Log ricerca** sempre presente: mostra per ogni chiave dove il valore è stato trovato (o perché non è stato trovato)
 - Prima riga bloccata e filtri automatici attivi
-- Tema cromatico Enel (rosso), righe alternate per leggibilità
+- Tema cromatico Enel (rosso), righe alternate; colonna log con sfondo neutro distinto
 
 ---
 
@@ -31,7 +33,7 @@ Il file Excel generato (`enel_emails_YYYYMMDD_HHMMSS.xlsx`) contiene le colonne 
 
 ## Configurazione settings.json
 
-Il file `settings.json` definisce quali mittenti monitorare e quali valori estrarre dal corpo di ogni email.
+Il file `settings.json` definisce quali mittenti monitorare, quali valori estrarre e da dove cercarli.
 
 ```json
 {
@@ -50,18 +52,28 @@ Il file `settings.json` definisce quali mittenti monitorare e quali valori estra
 
 **Campi:**
 
-| Campo | Tipo | Descrizione |
-|---|---|---|
-| `email` | stringa | Indirizzo del mittente da cercare |
-| `extract_keys` | array di stringhe | Etichette da cercare nel corpo dell'email; lascia `[]` per non estrarre nulla |
+| Campo | Tipo | Obbligatorio | Descrizione |
+|---|---|---|---|
+| `email` | stringa | ✓ | Indirizzo del mittente da cercare |
+| `extract_keys` | array di stringhe | ✓ | Etichette da cercare; lascia `[]` per non estrarre nulla |
+| `extract_from` | stringa | — | Sorgente di ricerca (vedi tabella sotto); se omesso usa la modalità **auto** |
+
+**Valori di `extract_from`:**
+
+| Valore | Comportamento |
+|---|---|
+| *(omesso)* | **Auto**: cerca prima nel corpo email; se non trova, controlla se ci sono allegati PDF e li analizza |
+| `"body"` | Cerca solo nel corpo email |
+| `"pdf"` | Cerca solo negli allegati PDF |
+| `"both"` | Cerca nel corpo e nei PDF insieme (testo unificato) |
 
 **Regole:**
 - Ogni chiave in `extract_keys` genera una colonna aggiuntiva nel file Excel
 - Se la stessa chiave appare in più mittenti, viene creata **una sola colonna** condivisa
-- Per i mittenti senza chiavi lo script usa solo i metadati (più veloce)
-- Puoi aggiungere quanti mittenti e chiavi vuoi senza modificare il codice
+- Per i mittenti senza chiavi lo script usa solo i metadati (più veloce, nessun download del corpo)
+- La colonna **Log ricerca** viene sempre aggiunta e indica per ogni email dove la chiave è stata trovata
 
-**Esempio con più mittenti e chiavi:**
+**Esempio con `extract_from` esplicito:**
 
 ```json
 {
@@ -76,13 +88,14 @@ Il file `settings.json` definisce quali mittenti monitorare e quali valori estra
     },
     {
       "email": "fatture@altrofornitore.it",
-      "extract_keys": ["TOTALE DA PAGARE", "NUMERO FATTURA"]
+      "extract_keys": ["TOTALE DA PAGARE", "NUMERO FATTURA"],
+      "extract_from": "pdf"
     }
   ]
 }
 ```
 
-Questo produrrebbe un Excel con le colonne: `#`, `Data`, `Mittente`, `Oggetto`, `Anteprima`, `TOTALE DA PAGARE`, `NUMERO FATTURA`.
+Questo produrrebbe un Excel con le colonne: `#`, `Data`, `Mittente`, `Oggetto`, `Anteprima`, `TOTALE DA PAGARE`, `NUMERO FATTURA`, `Log ricerca`.
 
 ---
 
@@ -115,7 +128,7 @@ pip install -r requirements.txt
 Oppure manualmente:
 
 ```bash
-pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl
+pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl pdfplumber
 ```
 
 **Librerie installate:**
@@ -126,6 +139,7 @@ pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib o
 | `google-auth-httplib2` | >= 0.1.0 | Trasporto HTTP per l'autenticazione |
 | `google-auth-oauthlib` | >= 0.5.0 | Flusso OAuth2 per desktop |
 | `openpyxl` | >= 3.0.0 | Generazione file Excel `.xlsx` |
+| `pdfplumber` | >= 0.9.0 | Estrazione testo da allegati PDF |
 
 ---
 
@@ -311,8 +325,8 @@ Il token di accesso viene salvato in `token.json`. Lo script si avvierà diretta
 ```
 ============================================================
    Gmail Utilities Bill Retrieve
-   • enelenergia@enel.sandsiv.com  [—]
-   • noreply.enelenergia@enel.com  [TOTALE DA PAGARE]
+   • enelenergia@enel.sandsiv.com  [—]  (sorgente: auto)
+   • noreply.enelenergia@enel.com  [TOTALE DA PAGARE]  (sorgente: auto)
 ============================================================
 
 Account: tuo@gmail.com
@@ -322,7 +336,7 @@ Ricerca email da: enelenergia@enel.sandsiv.com
   18/18 elaborati
 
 Ricerca email da: noreply.enelenergia@enel.com
-  Chiavi da estrarre: TOTALE DA PAGARE
+  Chiavi da estrarre: TOTALE DA PAGARE  [sorgente: auto]
   Trovati 12 messaggi — scaricamento dettagli...
   12/12 elaborati
 
@@ -390,7 +404,13 @@ Il file `settings.json` esiste ma l'array `senders` è vuoto. Aggiungi almeno un
 Verifica che il mittente sia scritto correttamente in `settings.json` e che abbia effettivamente inviato email alla casella autenticata. Puoi cercarlo manualmente in Gmail con `from:indirizzo@esempio.com`.
 
 ### La chiave non viene trovata / la colonna è vuota
-Il testo estratto dall'email potrebbe avere un formato diverso dal previsto. Lo script usa tre strategie di ricerca progressive (importo con €, numero decimale, primo token). Se nessuna funziona, verifica il layout reale dell'email e aggiusta la chiave in `settings.json` in modo che corrisponda esattamente al testo presente nel corpo.
+Controlla la colonna **Log ricerca** nel file Excel: indica esattamente dove è stata cercata la chiave e perché non è stata trovata. Lo script usa tre strategie progressive (importo con €, numero decimale, primo token). Se nessuna funziona, verifica il testo reale dell'email o del PDF e aggiusta la chiave in `settings.json` in modo che corrisponda esattamente.
+
+### Il valore viene trovato nel corpo ma l'importo è nel PDF
+Imposta `"extract_from": "pdf"` o `"extract_from": "both"` per quel mittente in `settings.json`. Se lasci il campo omesso, la modalità **auto** prova prima il corpo e poi il PDF automaticamente.
+
+### Errore lettura PDF
+`pdfplumber` potrebbe non riuscire a estrarre testo da PDF scansionati (immagini). In quel caso la colonna log riporterà `✗ non trovato` anche se il PDF è presente. I PDF nativi (generati digitalmente) funzionano correttamente.
 
 ### Voglio usare un account Gmail diverso
 Cancella `token.json` e riesegui lo script: verrà chiesta una nuova autenticazione.
@@ -404,8 +424,11 @@ Cancella `token.json` e riesegui lo script: verrà chiesta una nuova autenticazi
 - L'API Gmail ha un limite di 1 miliardo di unità quota al giorno — ampiamente sufficiente per uso personale
 - Lo script processa i messaggi in batch da 500 per ottimizzare le chiamate API
 - Per i mittenti **senza** `extract_keys` lo script usa `format=metadata` (solo intestazioni): più veloce e meno quota consumata
-- Per i mittenti **con** `extract_keys` lo script usa `format=full` per scaricare il corpo completo e applicare l'estrazione
+- Per i mittenti **con** `extract_keys` lo script usa `format=full` per scaricare il corpo completo e gli allegati
 - L'estrazione di un valore avviene in tre passaggi: ① importo con simbolo €, ② numero decimale generico, ③ primo token dopo la chiave
+- Gli allegati PDF vengono cercati (`_find_pdf_parts`) prima di scaricarli: il download avviene solo se la chiave non è stata trovata nel corpo (modalità auto) o se `extract_from` è `"pdf"` / `"both"`
+- I PDF vengono letti con `pdfplumber` (testo nativo); PDF scansionati (immagini) non producono testo
+- La colonna **Log ricerca** riporta per ogni chiave: `corpo ✓`, `PDF ✓ (nome file)`, o `✗ non trovato (motivazione)`
 
 ---
 
