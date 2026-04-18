@@ -560,10 +560,11 @@ def fetch_all_emails(service, senders_config, date_range=None):
 
     for sender_cfg in senders_config:
         sender       = sender_cfg["email"]
-        keys         = sender_cfg.get("extract_keys", [])
-        extract_from = sender_cfg.get("extract_from", "")  # "" = auto
-        link_text    = sender_cfg.get("link_text", None)
-        needs_full   = bool(keys)
+        keys          = sender_cfg.get("extract_keys", [])
+        extract_from  = sender_cfg.get("extract_from", "")  # "" = auto
+        link_text     = sender_cfg.get("link_text", None)
+        supply_labels = sender_cfg.get("supply_labels", [])
+        needs_full    = bool(keys) or bool(supply_labels)
 
         src_label = extract_from if extract_from else "auto"
         print(f"\nRicerca email da: {sender}")
@@ -592,6 +593,16 @@ def fetch_all_emails(service, senders_config, date_range=None):
                     service, msg_info["id"], payload, keys, extract_from, link_text
                 )
 
+                supply_label = ""
+                if supply_labels:
+                    subject_text = headers.get("subject", "")
+                    body_text    = extract_body_text(payload)
+                    search_text  = (subject_text + " " + body_text).upper()
+                    for label in supply_labels:
+                        if label.upper() in search_text:
+                            supply_label = label
+                            break
+
                 all_emails.append({
                     "sender_email": sender,
                     "from":         headers.get("from", sender),
@@ -601,6 +612,7 @@ def fetch_all_emails(service, senders_config, date_range=None):
                     "snippet":      msg.get("snippet", ""),
                     "extracted":    extracted,
                     "search_log":   search_log,
+                    "supply_label": supply_label,
                 })
 
                 if i % 50 == 0 or i == len(msg_ids):
@@ -633,7 +645,7 @@ def _make_sheet_name(sender_email, existing_names):
     return clean  # fallback (non dovrebbe mai accadere)
 
 
-def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
+def _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=False):
     """Crea un foglio Excel per un singolo mittente."""
     from openpyxl.utils import get_column_letter
 
@@ -651,10 +663,11 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
         ("Oggetto",   55,  left_wrap,  data_font),
         ("Anteprima", 75,  left_wrap,  data_font),
     ]
+    supply_col    = [("Tipo fornitura", 20, center_top, data_font)] if has_supply_label else []
     dynamic_cols  = [(key, 22, right_top, value_font) for key in keys]
     totale_col    = [("TOTALE DEFINITIVO", 22, right_top, value_font)]
     log_col       = [("Log ricerca", 55, left_wrap, log_font)]
-    all_cols      = fixed_cols + dynamic_cols + totale_col + log_col
+    all_cols      = fixed_cols + supply_col + dynamic_cols + totale_col + log_col
 
     for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
@@ -679,6 +692,8 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles):
             (email["subject"],  left_wrap,  data_font,  fill),
             (email["snippet"],  left_wrap,  data_font,  fill),
         ]
+        if has_supply_label:
+            row_values.append((email.get("supply_label", ""), center_top, data_font, fill))
         for key in keys:
             row_values.append((email["extracted"].get(key, ""), right_top, value_font, fill))
         if keys:
@@ -760,7 +775,8 @@ def create_excel_report(emails, senders_config, output_file):
         sheet_name     = _make_sheet_name(sender, sheet_names)
         sheet_names.append(sheet_name)
 
-        _write_sheet(wb, sheet_name, sender_emails, keys, styles)
+        has_supply = bool(sender_cfg.get("supply_labels"))
+        _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=has_supply)
         print(f"  Foglio '{sheet_name}': {len(sender_emails)} email")
 
     wb.save(output_file)

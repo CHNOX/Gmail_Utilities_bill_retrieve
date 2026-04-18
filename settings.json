@@ -7,10 +7,11 @@
       "to":     "Data finale inclusa (es. '2024-12-31')"
     },
     "campi": {
-      "email":        "Indirizzo email del mittente da cercare (obbligatorio)",
-      "extract_keys": "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
-      "extract_from": "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)",
-      "link_text":    "Testo (o sottostringa) del pulsante/link da seguire — usato solo con extract_from: link (opzionale)"
+      "email":          "Indirizzo email del mittente da cercare (obbligatorio)",
+      "extract_keys":   "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
+      "extract_from":   "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)",
+      "link_text":      "Testo (o sottostringa) del pulsante/link da seguire — usato solo con extract_from: link (opzionale)",
+      "supply_labels":  "Array di etichette tipo fornitura (es. ['Gas', 'Energia Elettrica', 'Acqua']); aggiunge la colonna 'Tipo fornitura' con la prima etichetta trovata nell'email (opzionale)"
     },
     "valori_extract_from": {
       "(omesso)": "AUTO: cerca prima nel corpo; se non trova, cerca negli allegati PDF",
@@ -52,21 +53,35 @@
   },
 
   "date_range": {
-    "from": "2024-01-01",
-    "to":   "2025-12-31"
+    "from": "2026-01-01",
+    "to":   "2026-12-31"
   },
 
   "senders": [
     {
-      "email":        "noreply.enelenergia@enel.com",
-      "extract_keys": ["TOTALE DA PAGARE"],
-      "extract_from": "pdf"
+      "email":          "noreply.enelenergia@enel.com",
+      "extract_keys":   ["TOTALE DA PAGARE","Quanto pago?"],
+      "extract_from":   "body",
+      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"]
     },
     {
-      "email":        "fatturahera@contatti.gruppohera.it",
-      "extract_keys": ["Totale da pagare"],
-      "extract_from": "link",
-      "link_text":    "Documento pdf"
+      "email":          "fatturahera@contatti.gruppohera.it",
+      "extract_keys":   ["TOTALE DA PAGARE","Quanto pago?"],
+      "extract_from":   "body",
+      "supply_labels":  ["Gas", "Energia Elettrica", "Acqua"]
+    },
+    {
+      "email":          "fatturahera@contatti.gruppohera.it",
+      "extract_keys":   ["Totale da pagare"],
+      "extract_from":   "link",
+      "link_text":      "Documento pdf",
+      "supply_labels":  ["Gas", "Energia Elettrica", "Acqua"]
+    },
+    {
+      "email":          "noreply@lirabo.com",
+      "extract_keys":   ["TOTALE FATTURA"],
+      "extract_from":   "pdf",
+      "supply_labels":  ["Acqua", "Gas", "Energia Elettrica"]
     }
   ]
 }
