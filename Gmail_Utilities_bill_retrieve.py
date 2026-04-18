@@ -155,6 +155,96 @@ def _html_to_text(html_content):
     return s.get_text()
 
 
+class _LinkExtractor(HTMLParser):
+    """Estrae tutti i link (testo visibile, href) dai tag <a> in HTML."""
+    def __init__(self):
+        super().__init__()
+        self._links      = []
+        self._cur_href   = None
+        self._cur_text   = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = dict(attrs).get("href", "")
+            if href and href.startswith("http"):
+                self._cur_href = href
+                self._cur_text = []
+
+    def handle_data(self, data):
+        if self._cur_href is not None:
+            self._cur_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._cur_href:
+            self._links.append((" ".join(self._cur_text).strip(), self._cur_href))
+            self._cur_href = None
+
+    def get_links(self):
+        return self._links
+
+
+def _extract_html_body(payload):
+    """Restituisce il corpo HTML grezzo del messaggio (non stripped)."""
+    mime = payload.get("mimeType", "")
+    if mime == "text/html":
+        raw = payload.get("body", {}).get("data", "")
+        if raw:
+            return base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
+    for part in payload.get("parts", []):
+        pt  = part.get("mimeType", "")
+        raw = part.get("body", {}).get("data", "")
+        if pt == "text/html" and raw:
+            return base64.urlsafe_b64decode(raw + "==").decode("utf-8", errors="replace")
+        if part.get("parts"):
+            nested = _extract_html_body(part)
+            if nested:
+                return nested
+    return ""
+
+
+def _find_links(payload):
+    """Restituisce lista di (testo, url) dai link <a> nel corpo HTML."""
+    extractor = _LinkExtractor()
+    extractor.feed(_extract_html_body(payload))
+    return extractor.get_links()
+
+
+def _select_link(links, link_text=None):
+    """
+    Sceglie l'URL migliore dalla lista.
+    Se link_text è fornito, cerca il primo link il cui testo o URL lo contiene
+    (case-insensitive). Altrimenti restituisce il primo link disponibile.
+    """
+    if not links:
+        return None
+    if link_text:
+        lt = link_text.lower()
+        for text, url in links:
+            if lt in text.lower() or lt in url.lower():
+                return url
+    return links[0][1]
+
+
+def _download_url_as_text(url):
+    """
+    Scarica l'URL e restituisce il testo estratto.
+    Gestisce PDF (pdfplumber) e HTML (stripping tag).
+    """
+    import requests
+    try:
+        resp = requests.get(url, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf"):
+            return _pdf_bytes_to_text(resp.content)
+        if "html" in ctype:
+            return _html_to_text(resp.text)
+        return resp.text
+    except Exception as e:
+        print(f"    Errore download link ({url[:70]}): {e}")
+        return ""
+
+
 def extract_body_text(payload):
     """Estrae ricorsivamente il testo dal payload Gmail (plain > html > multipart)."""
     mime = payload.get("mimeType", "")
@@ -290,7 +380,7 @@ def _download_pdf_text(service, msg_id, part):
 # Estrazione con log
 # ---------------------------------------------------------------------------
 
-def _extract_with_log(service, msg_id, payload, keys, extract_from):
+def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=None):
     """
     Estrae i valori delle chiavi e genera un log descrittivo per ogni chiave.
 
@@ -298,7 +388,10 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from):
       "body"  → cerca solo nel corpo email
       "pdf"   → cerca solo negli allegati PDF
       "both"  → cerca nel corpo + PDF (testo unificato)
+      "link"  → segue il link/pulsante nel corpo HTML e scarica il documento collegato
       None/"" → automatico: corpo prima, poi PDF se la chiave non è trovata
+
+    link_text: testo (o sottostringa) del pulsante da seguire (usato con "link").
 
     Restituisce (extracted: dict, search_log: str).
     """
@@ -312,23 +405,37 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from):
     extracted = {}
     log_parts = []
 
-    # Lazy loaders — il testo viene calcolato/scaricato al primo accesso
-    _body_cache = [None]
-    _pdf_cache  = [None]
+    # Lazy loaders — ogni sorgente viene calcolata/scaricata solo al primo accesso
+    _cache = {"body": None, "pdf": None, "link_url": None, "link_text": None}
 
     def _body():
-        if _body_cache[0] is None:
-            _body_cache[0] = extract_body_text(payload)
-        return _body_cache[0]
+        if _cache["body"] is None:
+            _cache["body"] = extract_body_text(payload)
+        return _cache["body"]
 
     def _pdf():
-        if _pdf_cache[0] is None:
+        if _cache["pdf"] is None:
             if has_pdfs:
                 texts = [_download_pdf_text(service, msg_id, p) for p, _ in pdf_parts]
-                _pdf_cache[0] = "\n".join(t for t in texts if t)
+                _cache["pdf"] = "\n".join(t for t in texts if t)
             else:
-                _pdf_cache[0] = ""
-        return _pdf_cache[0]
+                _cache["pdf"] = ""
+        return _cache["pdf"]
+
+    def _link_url():
+        if _cache["link_url"] is None:
+            links = _find_links(payload)
+            _cache["link_url"] = _select_link(links, link_text) or ""
+            if not _cache["link_url"]:
+                _cache["link_url"] = ""   # evita None
+            _cache["_link_count"] = len(links)
+        return _cache["link_url"]
+
+    def _link_content():
+        if _cache["link_text"] is None:
+            url = _link_url()
+            _cache["link_text"] = _download_url_as_text(url) if url else ""
+        return _cache["link_text"]
 
     for key in keys:
         if extract_from == "body":
@@ -351,6 +458,22 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from):
             extracted[key] = val
             src = "corpo+PDF" if has_pdfs else "corpo"
             log_parts.append(f"{key}: {src} {'✓' if val else '✗ non trovato'}")
+
+        elif extract_from == "link":
+            url = _link_url()
+            val = extract_value_for_key(_link_content(), key)
+            extracted[key] = val
+            short_url = (url[:60] + "…") if len(url) > 60 else url
+            if val:
+                log_parts.append(f"{key}: link ✓ ({short_url})")
+            elif url:
+                log_parts.append(f"{key}: link ✗ non trovato ({short_url})")
+            else:
+                n = _cache.get("_link_count", 0)
+                log_parts.append(
+                    f"{key}: link ✗ nessun link corrispondente "
+                    f"({'link_text='+repr(link_text) if link_text else str(n)+' link trovati'})"
+                )
 
         else:  # auto
             val = extract_value_for_key(_body(), key)
@@ -398,12 +521,14 @@ def fetch_all_emails(service, senders_config):
         sender       = sender_cfg["email"]
         keys         = sender_cfg.get("extract_keys", [])
         extract_from = sender_cfg.get("extract_from", "")  # "" = auto
+        link_text    = sender_cfg.get("link_text", None)
         needs_full   = bool(keys)
 
         src_label = extract_from if extract_from else "auto"
         print(f"\nRicerca email da: {sender}")
         if keys:
-            print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {src_label}]")
+            extra = f"  link_text={repr(link_text)}" if extract_from == "link" and link_text else ""
+            print(f"  Chiavi da estrarre: {', '.join(keys)}  [sorgente: {src_label}{extra}]")
 
         msg_ids = _list_message_ids(service, sender)
         print(f"  Trovati {len(msg_ids)} messaggi — scaricamento dettagli...")
@@ -423,7 +548,7 @@ def fetch_all_emails(service, senders_config):
                 }
 
                 extracted, search_log = _extract_with_log(
-                    service, msg_info["id"], payload, keys, extract_from
+                    service, msg_info["id"], payload, keys, extract_from, link_text
                 )
 
                 all_emails.append({

@@ -4,13 +4,15 @@
     "campi": {
       "email":        "Indirizzo email del mittente da cercare (obbligatorio)",
       "extract_keys": "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
-      "extract_from": "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)"
+      "extract_from": "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)",
+      "link_text":    "Testo (o sottostringa) del pulsante/link da seguire — usato solo con extract_from: link (opzionale)"
     },
     "valori_extract_from": {
       "(omesso)": "AUTO: cerca prima nel corpo; se non trova, cerca negli allegati PDF",
       "body":     "Cerca solo nel corpo dell'email",
       "pdf":      "Cerca solo negli allegati PDF",
-      "both":     "Cerca nel corpo e nei PDF insieme (testo unificato)"
+      "both":     "Cerca nel corpo e nei PDF insieme (testo unificato)",
+      "link":     "Segue il link/pulsante nel corpo HTML, scarica il documento collegato (PDF o pagina web) ed estrae il testo"
     },
     "esempio_completo": {
       "senders": [
@@ -32,6 +34,13 @@
           "email":        "avvisi@provider.com",
           "extract_keys": ["IMPORTO DOVUTO"],
           "extract_from": "both"
+        },
+        {
+          "email":        "noreply@fornitore-con-link.it",
+          "extract_keys": ["TOTALE DA PAGARE"],
+          "extract_from": "link",
+          "link_text":    "Scarica bolletta",
+          "_note":        "Segue il link con testo 'Scarica bolletta' e cerca nel documento scaricato"
         }
       ]
     }
@@ -46,7 +55,8 @@
     {
       "email":        "fatturahera@contatti.gruppohera.it",
       "extract_keys": ["Totale da pagare"],
-      "extract_from": "pdf"
+      "extract_from": "link",
+      "link_text":    "Scarica"
     }
   ]
 }
