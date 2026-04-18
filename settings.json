@@ -1,11 +1,49 @@
 {
+  "_docs": {
+    "_note": "Questa sezione è documentazione — viene ignorata dal programma.",
+    "campi": {
+      "email":        "Indirizzo email del mittente da cercare (obbligatorio)",
+      "extract_keys": "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
+      "extract_from": "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)"
+    },
+    "valori_extract_from": {
+      "(omesso)": "AUTO: cerca prima nel corpo; se non trova, cerca negli allegati PDF",
+      "body":     "Cerca solo nel corpo dell'email",
+      "pdf":      "Cerca solo negli allegati PDF",
+      "both":     "Cerca nel corpo e nei PDF insieme (testo unificato)"
+    },
+    "esempio_completo": {
+      "senders": [
+        {
+          "email":        "mittente.senza.estrazione@esempio.com",
+          "extract_keys": []
+        },
+        {
+          "email":        "bollette@fornitore.it",
+          "extract_keys": ["TOTALE DA PAGARE"],
+          "_note":        "extract_from omesso → modalità AUTO"
+        },
+        {
+          "email":        "fatture@altrofornitore.it",
+          "extract_keys": ["TOTALE DA PAGARE", "NUMERO FATTURA"],
+          "extract_from": "pdf"
+        },
+        {
+          "email":        "avvisi@provider.com",
+          "extract_keys": ["IMPORTO DOVUTO"],
+          "extract_from": "both"
+        }
+      ]
+    }
+  },
+
   "senders": [
     {
-      "email": "enelenergia@enel.sandsiv.com",
+      "email":        "enelenergia@enel.sandsiv.com",
       "extract_keys": []
     },
     {
-      "email": "noreply.enelenergia@enel.com",
+      "email":        "noreply.enelenergia@enel.com",
       "extract_keys": ["TOTALE DA PAGARE"]
     }
   ]
