@@ -75,7 +75,11 @@ def load_settings():
 
     # Normalizza le chiavi in uppercase (case-insensitive, colonna Excel condivisa)
     for s in senders:
-        s["extract_keys"] = [k.upper() for k in s.get("extract_keys", [])]
+        s["extract_bill"] = [k.upper() for k in s.get("extract_bill", [])]
+        if s.get("extract_customer"):
+            s["extract_customer"] = s["extract_customer"].upper()
+        if s.get("extract_period"):
+            s["extract_period"] = s["extract_period"].upper()
 
     # Legge il range di date globale (entrambi i campi opzionali)
     dr_raw     = settings.get("date_range", {})
@@ -91,7 +95,7 @@ def collect_all_keys(senders_config):
     """Restituisce la lista ordinata di tutte le chiavi uniche tra i mittenti."""
     seen = {}
     for s in senders_config:
-        for key in s.get("extract_keys", []):
+        for key in s.get("extract_bill", []):
             seen[key] = None  # dict per preservare l'ordine di inserimento
     return list(seen)
 
@@ -146,9 +150,23 @@ def parse_date(date_str):
 
 
 class _HTMLStripper(HTMLParser):
+    # Tag che nella resa visiva iniziano una nuova riga — aggiungere \n garantisce
+    # che il testo estratto abbia separatori semantici utili per text_only extraction.
+    _NEWLINE_TAGS = {"br", "p", "div", "tr", "li", "td", "th",
+                     "h1", "h2", "h3", "h4", "h5", "h6",
+                     "section", "article", "header", "footer"}
+
     def __init__(self):
         super().__init__()
         self._parts = []
+
+    def handle_starttag(self, tag, _attrs):
+        if tag.lower() in self._NEWLINE_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self._NEWLINE_TAGS:
+            self._parts.append("\n")
 
     def handle_data(self, data):
         self._parts.append(data)
@@ -305,19 +323,43 @@ def _parse_amount(value):
         return None
 
 
-def extract_value_for_key(text, key):
+def extract_value_for_key(text, key, text_only=False):
     """
     Cerca `key` nel testo e restituisce il valore associato.
-    Strategia:
+    Strategia (skippata se text_only=True):
       1. Importo con simbolo €  (es. "123,45 €" o "€ 123,45")
       2. Numero decimale generico (es. "123,45" o "123.45")
-      3. Prima parola/token non vuoto dopo la chiave
+    Strategia 3:
+      text_only=False → primo token non vuoto dopo la chiave (testo normalizzato)
+      text_only=True  → resto della riga dopo la chiave (testo grezzo, preserva spazi interni)
     """
     if not text:
         return ""
 
-    normalized = re.sub(r"\s+", " ", text)
     escaped_key = re.escape(key)
+
+    if text_only:
+        # Lavora sul testo grezzo sfruttando due delimitatori naturali:
+        #   - \n   → fine riga (PDF a singola colonna, HTML con tag blocco da _HTMLStripper)
+        #   - \s{2,} → spazi multipli (separatore di colonna nei PDF a doppia colonna)
+        # \s*[:\-]?\s* assorbe il separatore tra chiave e valore (spazi, ":", "–", \n).
+        m = re.search(
+            rf"{escaped_key}\s*[:\-]?\s*(.+?)(?=\s{{2,}}|[\r\n]|$)",
+            text, re.IGNORECASE | re.MULTILINE
+        )
+        if m:
+            val = m.group(1).strip()
+            if val:
+                return val
+        # Fallback: fino a 6 token su testo normalizzato (HTML piatto senza \n né doppi spazi).
+        normalized_fb = re.sub(r"\s+", " ", text)
+        m = re.search(
+            rf"{escaped_key}\s*[:\-]?\s*(\S+(?:\s+\S+){{0,5}})",
+            normalized_fb, re.IGNORECASE
+        )
+        return m.group(1).strip() if m else ""
+
+    normalized = re.sub(r"\s+", " ", text)
 
     # 1. importo con €
     for pattern in (
@@ -362,11 +404,21 @@ def _iter_parts(payload):
 
 
 def _pdf_bytes_to_text(pdf_bytes):
-    """Estrae il testo da un PDF in memoria usando pdfplumber."""
+    """Estrae il testo da un PDF in memoria usando pdfplumber.
+    layout=True preserva le distanze reali tra caratteri: nei PDF a più colonne
+    produce spazi multipli tra le colonne, utili come delimitatori in text_only.
+    """
     import pdfplumber
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+            pages = []
+            for page in pdf.pages:
+                try:
+                    text = page.extract_text(layout=True) or ""
+                except TypeError:
+                    text = page.extract_text() or ""
+                pages.append(text)
+            return "\n".join(pages)
     except Exception as e:
         print(f"    Errore lettura PDF: {e}")
         return ""
@@ -407,7 +459,7 @@ def _download_pdf_text(service, msg_id, part):
 # Estrazione con log
 # ---------------------------------------------------------------------------
 
-def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=None):
+def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=None, text_only_keys=None):
     """
     Estrae i valori delle chiavi e genera un log descrittivo per ogni chiave.
 
@@ -418,7 +470,8 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=No
       "link"  → segue il link/pulsante nel corpo HTML e scarica il documento collegato
       None/"" → automatico: corpo prima, poi PDF se la chiave non è trovata
 
-    link_text: testo (o sottostringa) del pulsante da seguire (usato con "link").
+    link_text:      testo (o sottostringa) del pulsante da seguire (usato con "link").
+    text_only_keys: set di chiavi che devono saltare le strategie monetarie (€/decimale).
 
     Restituisce (extracted: dict, search_log: str).
     """
@@ -464,14 +517,18 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=No
             _cache["link_text"] = _download_url_as_text(url) if url else ""
         return _cache["link_text"]
 
+    _text_only_keys = text_only_keys or set()
+
     for key in keys:
+        tonly = key in _text_only_keys
+
         if extract_from == "body":
-            val = extract_value_for_key(_body(), key)
+            val = extract_value_for_key(_body(), key, text_only=tonly)
             extracted[key] = val
             log_parts.append(f"{key}: corpo {'✓' if val else '✗ non trovato'}")
 
         elif extract_from == "pdf":
-            val = extract_value_for_key(_pdf(), key)
+            val = extract_value_for_key(_pdf(), key, text_only=tonly)
             extracted[key] = val
             if val:
                 log_parts.append(f"{key}: PDF ✓ ({pdf_names})")
@@ -481,14 +538,14 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=No
                 log_parts.append(f"{key}: PDF ✗ nessun allegato")
 
         elif extract_from == "both":
-            val = extract_value_for_key(_body() + "\n" + _pdf(), key)
+            val = extract_value_for_key(_body() + "\n" + _pdf(), key, text_only=tonly)
             extracted[key] = val
             src = "corpo+PDF" if has_pdfs else "corpo"
             log_parts.append(f"{key}: {src} {'✓' if val else '✗ non trovato'}")
 
         elif extract_from == "link":
             url = _link_url()
-            val = extract_value_for_key(_link_content(), key)
+            val = extract_value_for_key(_link_content(), key, text_only=tonly)
             extracted[key] = val
             short_url = (url[:60] + "…") if len(url) > 60 else url
             if val:
@@ -503,12 +560,12 @@ def _extract_with_log(service, msg_id, payload, keys, extract_from, link_text=No
                 )
 
         else:  # auto
-            val = extract_value_for_key(_body(), key)
+            val = extract_value_for_key(_body(), key, text_only=tonly)
             if val:
                 extracted[key] = val
                 log_parts.append(f"{key}: corpo ✓")
             else:
-                val = extract_value_for_key(_pdf(), key)
+                val = extract_value_for_key(_pdf(), key, text_only=tonly)
                 if val:
                     extracted[key] = val
                     log_parts.append(f"{key}: PDF ✓ ({pdf_names})")
@@ -560,11 +617,13 @@ def fetch_all_emails(service, senders_config, date_range=None):
 
     for sender_cfg in senders_config:
         sender       = sender_cfg["email"]
-        keys          = sender_cfg.get("extract_keys", [])
+        keys          = sender_cfg.get("extract_bill", [])
         extract_from  = sender_cfg.get("extract_from", "")  # "" = auto
         link_text     = sender_cfg.get("link_text", None)
         supply_labels = sender_cfg.get("supply_labels", [])
-        needs_full    = bool(keys) or bool(supply_labels)
+        customer_key  = sender_cfg.get("extract_customer", "")
+        period_key    = sender_cfg.get("extract_period", "")
+        needs_full    = bool(keys) or bool(supply_labels) or bool(customer_key) or bool(period_key)
 
         src_label = extract_from if extract_from else "auto"
         print(f"\nRicerca email da: {sender}")
@@ -589,9 +648,15 @@ def fetch_all_emails(service, senders_config, date_range=None):
                     for h in payload.get("headers", [])
                 }
 
+                extra_keys = [k for k in (customer_key, period_key) if k and k not in keys]
+                all_keys   = keys + extra_keys
+                text_only  = {k for k in (customer_key, period_key) if k}
                 extracted, search_log = _extract_with_log(
-                    service, msg_info["id"], payload, keys, extract_from, link_text
+                    service, msg_info["id"], payload, all_keys, extract_from, link_text,
+                    text_only_keys=text_only or None,
                 )
+                customer_value = extracted.pop(customer_key, "") if customer_key else ""
+                period_value   = extracted.pop(period_key,   "") if period_key   else ""
 
                 supply_label = ""
                 if supply_labels:
@@ -604,15 +669,17 @@ def fetch_all_emails(service, senders_config, date_range=None):
                             break
 
                 all_emails.append({
-                    "sender_email": sender,
-                    "from":         headers.get("from", sender),
-                    "subject":      headers.get("subject", "(nessun oggetto)"),
-                    "date_raw":     headers.get("date", ""),
-                    "date":         parse_date(headers.get("date", "")),
-                    "snippet":      msg.get("snippet", ""),
-                    "extracted":    extracted,
-                    "search_log":   search_log,
-                    "supply_label": supply_label,
+                    "sender_email":   sender,
+                    "from":           headers.get("from", sender),
+                    "subject":        headers.get("subject", "(nessun oggetto)"),
+                    "date_raw":       headers.get("date", ""),
+                    "date":           parse_date(headers.get("date", "")),
+                    "snippet":        msg.get("snippet", ""),
+                    "extracted":      extracted,
+                    "search_log":     search_log,
+                    "supply_label":   supply_label,
+                    "customer_value": customer_value,
+                    "period_value":   period_value,
                 })
 
                 if i % 50 == 0 or i == len(msg_ids):
@@ -645,7 +712,7 @@ def _make_sheet_name(sender_email, existing_names):
     return clean  # fallback (non dovrebbe mai accadere)
 
 
-def _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=False):
+def _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=False, customer_key="", period_key=""):
     """Crea un foglio Excel per un singolo mittente."""
     from openpyxl.utils import get_column_letter
 
@@ -664,10 +731,12 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=F
         ("Anteprima", 75,  left_wrap,  data_font),
     ]
     supply_col    = [("Tipo fornitura", 20, center_top, data_font)] if has_supply_label else []
+    customer_col  = [("Cliente",        30, left_wrap,  data_font)] if customer_key      else []
+    period_col    = [("Periodo",        22, center_top, data_font)] if period_key         else []
     dynamic_cols  = [(key, 22, right_top, value_font) for key in keys]
     totale_col    = [("TOTALE DEFINITIVO", 22, right_top, value_font)]
     log_col       = [("Log ricerca", 55, left_wrap, log_font)]
-    all_cols      = fixed_cols + supply_col + dynamic_cols + totale_col + log_col
+    all_cols      = fixed_cols + supply_col + customer_col + period_col + dynamic_cols + totale_col + log_col
 
     for col, (title, width, *_) in enumerate(all_cols, 1):
         cell = ws.cell(row=1, column=col, value=title)
@@ -694,6 +763,10 @@ def _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=F
         ]
         if has_supply_label:
             row_values.append((email.get("supply_label", ""), center_top, data_font, fill))
+        if customer_key:
+            row_values.append((email.get("customer_value", ""), left_wrap,  data_font, fill))
+        if period_key:
+            row_values.append((email.get("period_value",   ""), center_top, data_font, fill))
         for key in keys:
             row_values.append((email["extracted"].get(key, ""), right_top, value_font, fill))
         if keys:
@@ -762,7 +835,7 @@ def create_excel_report(emails, senders_config, output_file):
     for email in emails:
         emails_by_sender[email["sender_email"]].append(email)
 
-    keys_by_sender = {s["email"]: s.get("extract_keys", []) for s in senders_config}
+    keys_by_sender = {s["email"]: s.get("extract_bill", []) for s in senders_config}
 
     wb = Workbook()
     wb.remove(wb.active)   # rimuove il foglio vuoto di default
@@ -775,8 +848,10 @@ def create_excel_report(emails, senders_config, output_file):
         sheet_name     = _make_sheet_name(sender, sheet_names)
         sheet_names.append(sheet_name)
 
-        has_supply = bool(sender_cfg.get("supply_labels"))
-        _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=has_supply)
+        has_supply   = bool(sender_cfg.get("supply_labels"))
+        customer_key = sender_cfg.get("extract_customer", "")
+        period_key   = sender_cfg.get("extract_period",   "")
+        _write_sheet(wb, sheet_name, sender_emails, keys, styles, has_supply_label=has_supply, customer_key=customer_key, period_key=period_key)
         print(f"  Foglio '{sheet_name}': {len(sender_emails)} email")
 
     wb.save(output_file)
@@ -795,7 +870,7 @@ def main():
     print("=" * 60)
     print("   Gmail Utilities Bill Retrieve")
     for s in senders_config:
-        keys_str = ", ".join(s.get("extract_keys", [])) or "—"
+        keys_str = ", ".join(s.get("extract_bill", [])) or "—"
         src      = s.get("extract_from") or "auto"
         print(f"   • {s['email']}  [{keys_str}]  (sorgente: {src})")
     dr_from = date_range["from"].strftime("%d/%m/%Y") if date_range["from"] else "—"

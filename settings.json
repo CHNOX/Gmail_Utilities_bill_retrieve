@@ -8,10 +8,12 @@
     },
     "campi": {
       "email":          "Indirizzo email del mittente da cercare (obbligatorio)",
-      "extract_keys":   "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
+      "extract_bill":   "Array di etichette da cercare nel testo; usa [] per non estrarre nulla (obbligatorio)",
       "extract_from":   "Sorgente di ricerca (opzionale — se omesso usa la modalità AUTO)",
       "link_text":      "Testo (o sottostringa) del pulsante/link da seguire — usato solo con extract_from: link (opzionale)",
-      "supply_labels":  "Array di etichette tipo fornitura (es. ['Gas', 'Energia Elettrica', 'Acqua']); aggiunge la colonna 'Tipo fornitura' con la prima etichetta trovata nell'email (opzionale)"
+      "supply_labels":    "Array di etichette tipo fornitura (es. ['Gas', 'Energia Elettrica', 'Acqua']); aggiunge la colonna 'Tipo fornitura' con la prima etichetta trovata nell'email (opzionale)",
+      "extract_customer": "Chiave testuale da cercare nel testo (es. 'Intestatario' o 'CODICE CLIENTE'); aggiunge la colonna 'Cliente' con il valore estratto dopo la chiave (opzionale)",
+      "extract_period":   "Chiave testuale da cercare nel testo (es. 'Periodo di fornitura' o 'Competenza'); aggiunge la colonna 'Periodo' con il valore estratto dopo la chiave (opzionale)"
     },
     "valori_extract_from": {
       "(omesso)": "AUTO: cerca prima nel corpo; se non trova, cerca negli allegati PDF",
@@ -24,26 +26,26 @@
       "senders": [
         {
           "email":        "mittente.senza.estrazione@esempio.com",
-          "extract_keys": []
+          "extract_bill": []
         },
         {
           "email":        "bollette@fornitore.it",
-          "extract_keys": ["TOTALE DA PAGARE"],
+          "extract_bill": ["TOTALE DA PAGARE"],
           "_note":        "extract_from omesso → modalità AUTO"
         },
         {
           "email":        "fatture@altrofornitore.it",
-          "extract_keys": ["TOTALE DA PAGARE", "NUMERO FATTURA"],
+          "extract_bill": ["TOTALE DA PAGARE", "NUMERO FATTURA"],
           "extract_from": "pdf"
         },
         {
           "email":        "avvisi@provider.com",
-          "extract_keys": ["IMPORTO DOVUTO"],
+          "extract_bill": ["IMPORTO DOVUTO"],
           "extract_from": "both"
         },
         {
           "email":        "noreply@fornitore-con-link.it",
-          "extract_keys": ["TOTALE DA PAGARE"],
+          "extract_bill": ["TOTALE DA PAGARE"],
           "extract_from": "link",
           "link_text":    "Scarica bolletta",
           "_note":        "Segue il link con testo 'Scarica bolletta' e cerca nel documento scaricato"
@@ -60,22 +62,28 @@
   "senders": [
     {
       "email":          "noreply.enelenergia@enel.com",
-      "extract_keys":   ["TOTALE DA PAGARE","Quanto pago?"],
+      "extract_bill":   ["TOTALE DA PAGARE","Quanto pago?"],
       "extract_from":   "body",
-      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"]
+      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"],
+	  "extract_customer": "N° Cliente",
+	  "extract_period": "Periodo di riferimento"
     },
     {
       "email":          "fatturahera@contatti.gruppohera.it",
-      "extract_keys":   ["TOTALE DA PAGARE","Quanto pago?"],
+      "extract_bill":   ["TOTALE DA PAGARE","Quanto pago?"],
       "extract_from":   "link",
       "link_text":      "Documento pdf",
-      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"]
+      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"],
+	  "extract_customer": "Codice cliente",
+	  "extract_period": "Periodo oggetto di fatturazione:"
     },
     {
       "email":          "noreply@lirabo.com",
-      "extract_keys":   ["TOTALE FATTURA"],
+      "extract_bill":   ["TOTALE FATTURA"],
       "extract_from":   "pdf",
-      "supply_labels":  ["Acqua", "Gas", "Energia Elettrica"]
+      "supply_labels":  ["Acqua", "Gas", "Energia Elettrica"],
+	  "extract_customer": "CODICE CLIENTE",
+	  "extract_period": "PERIODO"
     }
   ]
 }
