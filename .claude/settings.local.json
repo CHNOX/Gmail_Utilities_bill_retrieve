@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth *)",
+      "Bash(git init *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(gh repo *)",
+      "Bash(git push *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Gmail_Utilities_bill_retrieve.py'\\).read\\(\\)\\); print\\('Sintassi OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Gmail_Utilities_bill_retrieve.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Gmail_Utilities_bill_retrieve.py'\\).read\\(\\)\\); import json; json.load\\(open\\('settings.json'\\)\\); print\\('tutto OK'\\)\")",
+      "Bash(python -m py_compile Gmail_Utilities_bill_retrieve.py)",
+      "Bash(python -c \"import json; json.load\\(open\\('settings.json'\\)\\); print\\('JSON OK'\\)\")"
+    ]
+  }
+}

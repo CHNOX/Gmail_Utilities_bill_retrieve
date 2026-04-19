@@ -67,15 +67,9 @@
     {
       "email":          "fatturahera@contatti.gruppohera.it",
       "extract_keys":   ["TOTALE DA PAGARE","Quanto pago?"],
-      "extract_from":   "body",
-      "supply_labels":  ["Gas", "Energia Elettrica", "Acqua"]
-    },
-    {
-      "email":          "fatturahera@contatti.gruppohera.it",
-      "extract_keys":   ["Totale da pagare"],
       "extract_from":   "link",
       "link_text":      "Documento pdf",
-      "supply_labels":  ["Gas", "Energia Elettrica", "Acqua"]
+      "supply_labels":  ["Energia Elettrica", "Gas", "Acqua"]
     },
     {
       "email":          "noreply@lirabo.com",
